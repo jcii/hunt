@@ -82,6 +82,25 @@ enum Commands {
         #[command(subcommand)]
         command: ResumeCommands,
     },
+
+    /// Clean up bad data in the database
+    Cleanup {
+        /// Remove navigation artifacts (non-job titles)
+        #[arg(long)]
+        artifacts: bool,
+
+        /// Remove duplicate jobs (keep first)
+        #[arg(long)]
+        duplicates: bool,
+
+        /// Run all cleanup operations
+        #[arg(long)]
+        all: bool,
+
+        /// Show what would be removed without removing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -165,6 +184,79 @@ enum ResumeCommands {
         /// Job ID
         job_id: i64,
     },
+}
+
+fn cleanup_artifacts(db: &Database, dry_run: bool) -> Result<usize> {
+    // Patterns that indicate navigation artifacts
+    let artifact_patterns = [
+        "view this job",
+        "view job",
+        "apply now",
+        "see more",
+        "view all",
+        "click here",
+        "learn more",
+        "read more",
+        "get started",
+        "sign in",
+        "log in",
+        "unsubscribe",
+    ];
+
+    let jobs = db.list_jobs(None, None)?;
+    let mut removed = 0;
+
+    for job in jobs {
+        let title_lower = job.title.to_lowercase();
+
+        // Check if title is too short (likely not a real job)
+        if job.title.len() < 5 {
+            if !dry_run {
+                db.delete_job(job.id)?;
+            }
+            removed += 1;
+            continue;
+        }
+
+        // Check if title matches artifact patterns
+        let is_artifact = artifact_patterns.iter().any(|pattern| {
+            title_lower.contains(pattern) && title_lower.len() < 50
+        });
+
+        if is_artifact {
+            if !dry_run {
+                db.delete_job(job.id)?;
+            }
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
+}
+
+fn cleanup_duplicates(db: &Database, dry_run: bool) -> Result<usize> {
+    let jobs = db.list_jobs(None, None)?;
+    let mut seen: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut removed = 0;
+
+    // Group by (title, employer) - keep the first one (lowest ID)
+    for job in jobs {
+        let employer = job.employer_name.as_deref().unwrap_or("");
+        let key = format!("{}|||{}", job.title.to_lowercase(), employer.to_lowercase());
+
+        if seen.contains_key(&key) {
+            // This is a duplicate - remove it
+            if !dry_run {
+                db.delete_job(job.id)?;
+            }
+            removed += 1;
+        } else {
+            // First occurrence - remember it
+            seen.insert(key, job.id);
+        }
+    }
+
+    Ok(removed)
 }
 
 fn main() -> Result<()> {
@@ -478,6 +570,47 @@ fn main() -> Result<()> {
                         }
                     }
                 }
+            }
+        }
+
+        Commands::Cleanup {
+            artifacts,
+            duplicates,
+            all,
+            dry_run,
+        } => {
+            db.ensure_initialized()?;
+
+            let mut total_removed = 0;
+
+            if artifacts || all {
+                println!("Checking for navigation artifacts...");
+                let removed = cleanup_artifacts(&db, dry_run)?;
+                total_removed += removed;
+                if dry_run {
+                    println!("  Would remove {} artifact(s)", removed);
+                } else {
+                    println!("  Removed {} artifact(s)", removed);
+                }
+            }
+
+            if duplicates || all {
+                println!("Checking for duplicate jobs...");
+                let removed = cleanup_duplicates(&db, dry_run)?;
+                total_removed += removed;
+                if dry_run {
+                    println!("  Would remove {} duplicate(s)", removed);
+                } else {
+                    println!("  Removed {} duplicate(s)", removed);
+                }
+            }
+
+            if !artifacts && !duplicates && !all {
+                println!("No cleanup operation specified. Use --artifacts, --duplicates, or --all");
+            } else if dry_run {
+                println!("\nTotal that would be removed: {}", total_removed);
+            } else {
+                println!("\nTotal removed: {}", total_removed);
             }
         }
     }

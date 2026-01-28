@@ -325,6 +325,27 @@ impl Database {
         Ok(status)
     }
 
+    pub fn delete_job(&self, id: i64) -> Result<()> {
+        // Delete associated snapshots first (foreign key constraint)
+        self.conn.execute(
+            "DELETE FROM job_snapshots WHERE job_id = ?1",
+            [id],
+        )?;
+
+        // Delete resume variants for this job
+        self.conn.execute(
+            "DELETE FROM resume_variants WHERE job_id = ?1",
+            [id],
+        )?;
+
+        // Delete the job
+        self.conn.execute(
+            "DELETE FROM jobs WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
+    }
+
     // --- Email ingestion support ---
 
     pub fn job_exists_by_url(&self, url: &str) -> Result<bool> {
