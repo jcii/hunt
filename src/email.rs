@@ -207,6 +207,42 @@ pub struct ParsedJob {
     pub raw_text: String,
 }
 
+fn is_navigation_artifact(text: &str) -> bool {
+    let text_lower = text.to_lowercase();
+    let text_trimmed = text.trim();
+
+    // Filter short titles (< 10 chars)
+    if text_trimmed.len() < 10 {
+        return true;
+    }
+
+    // Filter exact matches (case-insensitive)
+    let artifacts = [
+        "search for jobs",
+        "see all jobs",
+        "view all",
+        "search other jobs",
+        "jobs",
+    ];
+
+    for artifact in &artifacts {
+        if text_lower == *artifact {
+            return true;
+        }
+    }
+
+    // Filter patterns
+    if text_lower.starts_with("jobs similar to")
+        || text_lower.starts_with("jobs in ")
+        || text_lower.contains("unsubscribe")
+        || text_lower.contains("privacy")
+    {
+        return true;
+    }
+
+    false
+}
+
 fn parse_linkedin_email(subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
     let mut jobs = Vec::new();
     let document = Html::parse_document(body);
@@ -225,14 +261,12 @@ fn parse_linkedin_email(subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
             let text = element.text().collect::<Vec<_>>().join(" ");
             let text = text.trim();
 
-            if text.is_empty() || text.len() < 5 {
+            if text.is_empty() {
                 continue;
             }
 
-            // Skip non-job links
-            if text.to_lowercase().contains("view all")
-                || text.to_lowercase().contains("unsubscribe")
-            {
+            // Skip navigation artifacts
+            if is_navigation_artifact(text) {
                 continue;
             }
 
@@ -285,13 +319,12 @@ fn parse_indeed_email(subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
             let text = element.text().collect::<Vec<_>>().join(" ");
             let text = text.trim();
 
-            // Skip navigation/utility links
-            if text.is_empty()
-                || text.len() < 5
-                || text.to_lowercase().contains("unsubscribe")
-                || text.to_lowercase().contains("view all")
-                || text.to_lowercase().contains("privacy")
-            {
+            if text.is_empty() {
+                continue;
+            }
+
+            // Skip navigation artifacts
+            if is_navigation_artifact(text) {
                 continue;
             }
 
@@ -565,5 +598,53 @@ mod tests {
         let (title2, company2) = parse_title_at_company("DevOps Lead - Amazon");
         assert_eq!(title2, "DevOps Lead");
         assert_eq!(company2, Some("Amazon".to_string()));
+    }
+
+    #[test]
+    fn test_is_navigation_artifact_filters_short_titles() {
+        assert!(is_navigation_artifact("Jobs"));
+        assert!(is_navigation_artifact("View"));
+        assert!(is_navigation_artifact("Search"));
+        assert!(is_navigation_artifact("abc"));
+    }
+
+    #[test]
+    fn test_is_navigation_artifact_filters_exact_matches() {
+        assert!(is_navigation_artifact("Search for jobs"));
+        assert!(is_navigation_artifact("SEARCH FOR JOBS"));
+        assert!(is_navigation_artifact("See all jobs"));
+        assert!(is_navigation_artifact("View all"));
+        assert!(is_navigation_artifact("Search other jobs"));
+        assert!(is_navigation_artifact("Jobs"));
+    }
+
+    #[test]
+    fn test_is_navigation_artifact_filters_patterns() {
+        assert!(is_navigation_artifact("Jobs similar to Senior Engineer"));
+        assert!(is_navigation_artifact("Jobs in Bellevue"));
+        assert!(is_navigation_artifact("Jobs in Seattle, WA"));
+        assert!(is_navigation_artifact("Unsubscribe from alerts"));
+        assert!(is_navigation_artifact("Privacy settings"));
+    }
+
+    #[test]
+    fn test_is_navigation_artifact_allows_valid_jobs() {
+        assert!(!is_navigation_artifact("Staff DevOps Engineer, DevInfra SandboxAQ"));
+        assert!(!is_navigation_artifact("Senior Software Engineer at Google"));
+        assert!(!is_navigation_artifact("Principal Engineer - Cloud Infrastructure"));
+        assert!(!is_navigation_artifact("Site Reliability Engineer"));
+        assert!(!is_navigation_artifact("Full Stack Developer at Microsoft"));
+    }
+
+    #[test]
+    fn test_is_navigation_artifact_edge_cases() {
+        // Exactly 10 chars should not be filtered
+        assert!(!is_navigation_artifact("1234567890"));
+        // 9 chars should be filtered
+        assert!(is_navigation_artifact("123456789"));
+        // Empty string should be filtered
+        assert!(is_navigation_artifact(""));
+        // Whitespace only should be filtered (trimmed to empty)
+        assert!(is_navigation_artifact("   "));
     }
 }
