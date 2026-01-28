@@ -236,15 +236,20 @@ fn parse_linkedin_email(subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
                 continue;
             }
 
-            // Try to parse "Title at Company" or just title
-            let (title, employer) = parse_title_at_company(text);
+            // Try to parse LinkedIn format with location first, then fallback to other patterns
+            let (title, employer, location) = if let Some((t, e, l)) = parse_linkedin_title_company_location(text) {
+                (t, e, l)
+            } else {
+                let (t, e) = parse_title_at_company(text);
+                (t, e, None)
+            };
 
             if !title.is_empty() {
                 jobs.push(ParsedJob {
                     title,
                     employer,
                     url: clean_tracking_url(href),
-                    location: None,
+                    location,
                     pay_min: None,
                     pay_max: None,
                     source: "linkedin".to_string(),
@@ -354,13 +359,52 @@ fn extract_jobs_from_text(text: &str, source: &str) -> Result<Vec<ParsedJob>> {
     Ok(jobs)
 }
 
+fn parse_linkedin_title_company_location(text: &str) -> Option<(String, Option<String>, Option<String>)> {
+    // LinkedIn format: "Title             Company · Location"
+    // Multiple spaces separate title from company
+    // Middot (·) separates company from location
+
+    let text = text.trim();
+
+    // Look for middot (·) to separate company and location
+    if let Some(middot_idx) = text.find('·') {
+        let before_middot = &text[..middot_idx].trim();
+        let location = text[middot_idx + '·'.len_utf8()..].trim().to_string();
+
+        // Split before middot by multiple spaces (2+)
+        // Use regex to find the last occurrence of 2+ spaces
+        let re = regex::Regex::new(r"\s{2,}").ok()?;
+        let mut last_match = None;
+        for mat in re.find_iter(before_middot) {
+            last_match = Some(mat);
+        }
+
+        if let Some(space_match) = last_match {
+            let title = before_middot[..space_match.start()].trim().to_string();
+            let company = before_middot[space_match.end()..].trim().to_string();
+
+            if !title.is_empty() && !company.is_empty() {
+                return Some((title, Some(company), Some(location)));
+            }
+        }
+    }
+
+    None
+}
+
 fn parse_title_at_company(text: &str) -> (String, Option<String>) {
     // Common patterns:
     // "Software Engineer at Google"
     // "Software Engineer, Google"
     // "Software Engineer - Google"
+    // "Title             Company · Location" (LinkedIn specific)
 
     let text = text.trim();
+
+    // Try LinkedIn format first (most specific)
+    if let Some((title, company, _location)) = parse_linkedin_title_company_location(text) {
+        return (title, company);
+    }
 
     // Try " at " pattern
     if let Some(idx) = text.to_lowercase().find(" at ") {
@@ -449,4 +493,77 @@ pub struct IngestStats {
     pub emails_found: usize,
     pub jobs_added: usize,
     pub errors: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_linkedin_title_company_location() {
+        // Test case 1: Staff DevOps Engineer, DevInfra             SandboxAQ · United States (Remote)
+        let input1 = "Staff DevOps Engineer, DevInfra             SandboxAQ · United States (Remote)";
+        let result1 = parse_linkedin_title_company_location(input1);
+        assert!(result1.is_some());
+        let (title1, company1, location1) = result1.unwrap();
+        assert_eq!(title1, "Staff DevOps Engineer, DevInfra");
+        assert_eq!(company1, Some("SandboxAQ".to_string()));
+        assert_eq!(location1, Some("United States (Remote)".to_string()));
+
+        // Test case 2: Senior Platform Engineer             Sully.ai · Mountain View, CA (Remote)
+        let input2 = "Senior Platform Engineer             Sully.ai · Mountain View, CA (Remote)";
+        let result2 = parse_linkedin_title_company_location(input2);
+        assert!(result2.is_some());
+        let (title2, company2, location2) = result2.unwrap();
+        assert_eq!(title2, "Senior Platform Engineer");
+        assert_eq!(company2, Some("Sully.ai".to_string()));
+        assert_eq!(location2, Some("Mountain View, CA (Remote)".to_string()));
+
+        // Test case 3: Staff Engineer - Platform             Grow Therapy · New York, NY (Remote)
+        let input3 = "Staff Engineer - Platform             Grow Therapy · New York, NY (Remote)";
+        let result3 = parse_linkedin_title_company_location(input3);
+        assert!(result3.is_some());
+        let (title3, company3, location3) = result3.unwrap();
+        assert_eq!(title3, "Staff Engineer - Platform");
+        assert_eq!(company3, Some("Grow Therapy".to_string()));
+        assert_eq!(location3, Some("New York, NY (Remote)".to_string()));
+    }
+
+    #[test]
+    fn test_parse_linkedin_title_company_location_no_middot() {
+        // Should return None if no middot present
+        let input = "Senior Engineer at Google";
+        let result = parse_linkedin_title_company_location(input);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_linkedin_title_company_location_no_multiple_spaces() {
+        // Should return None if no multiple spaces before middot
+        let input = "Senior Engineer Company · Location";
+        let result = parse_linkedin_title_company_location(input);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_title_at_company_with_linkedin_format() {
+        // Should parse LinkedIn format through parse_title_at_company
+        let input = "Staff DevOps Engineer, DevInfra             SandboxAQ · United States (Remote)";
+        let (title, company) = parse_title_at_company(input);
+        assert_eq!(title, "Staff DevOps Engineer, DevInfra");
+        assert_eq!(company, Some("SandboxAQ".to_string()));
+    }
+
+    #[test]
+    fn test_parse_title_at_company_fallback_patterns() {
+        // Test " at " pattern
+        let (title1, company1) = parse_title_at_company("Software Engineer at Google");
+        assert_eq!(title1, "Software Engineer");
+        assert_eq!(company1, Some("Google".to_string()));
+
+        // Test " - " pattern
+        let (title2, company2) = parse_title_at_company("DevOps Lead - Amazon");
+        assert_eq!(title2, "DevOps Lead");
+        assert_eq!(company2, Some("Amazon".to_string()));
+    }
 }
