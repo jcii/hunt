@@ -368,6 +368,145 @@ impl Database {
         Ok(count > 0)
     }
 
+    /// Check if a job is a duplicate using sophisticated deduplication rules
+    pub fn is_duplicate_job(
+        &self,
+        title: &str,
+        employer: Option<&str>,
+        url: Option<&str>,
+    ) -> Result<Option<i64>> {
+        // Rule 1: Check by URL if present (exact match)
+        if let Some(url) = url {
+            let result: Option<i64> = self
+                .conn
+                .query_row(
+                    "SELECT id FROM jobs WHERE url = ?1",
+                    [url],
+                    |row| row.get(0),
+                )
+                .ok();
+            if result.is_some() {
+                return Ok(result);
+            }
+        }
+
+        // Rules 2-4: Check by title similarity with same employer
+        if let Some(employer) = employer {
+            // Get all jobs from this employer
+            let mut stmt = self.conn.prepare(
+                "SELECT j.id, j.title
+                 FROM jobs j
+                 JOIN employers e ON j.employer_id = e.id
+                 WHERE LOWER(e.name) = LOWER(?1)",
+            )?;
+
+            let jobs = stmt.query_map([employer], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+
+            let title_normalized = normalize_title(title);
+
+            for job_result in jobs {
+                let (job_id, existing_title) = job_result?;
+                let existing_normalized = normalize_title(&existing_title);
+
+                // Rule 2: Exact match (case-insensitive, normalized)
+                if title_normalized == existing_normalized {
+                    return Ok(Some(job_id));
+                }
+
+                // Rule 3: Substring match - if new title is substring of existing or vice versa
+                if existing_normalized.contains(&title_normalized)
+                    || title_normalized.contains(&existing_normalized)
+                {
+                    return Ok(Some(job_id));
+                }
+
+                // Rule 4: Fuzzy match - >80% similar
+                let similarity = strsim::jaro_winkler(&title_normalized, &existing_normalized);
+                if similarity > 0.8 {
+                    return Ok(Some(job_id));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Find and return all duplicate jobs
+    pub fn find_duplicates(&self) -> Result<Vec<(i64, i64, String)>> {
+        let mut duplicates = Vec::new();
+
+        // Get all jobs with their employer info
+        let mut stmt = self.conn.prepare(
+            "SELECT j.id, j.title, j.url, e.name, j.created_at
+             FROM jobs j
+             LEFT JOIN employers e ON j.employer_id = e.id
+             ORDER BY j.created_at ASC",
+        )?;
+
+        let mut jobs: Vec<(i64, String, Option<String>, Option<String>, String)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Check each job against earlier jobs
+        for i in 1..jobs.len() {
+            let (job_id, title, url, employer, _) = &jobs[i];
+
+            for j in 0..i {
+                let (earlier_id, earlier_title, earlier_url, earlier_employer, _) = &jobs[j];
+
+                // Skip if already marked as duplicate
+                if duplicates.iter().any(|(_, dup_id, _)| dup_id == job_id) {
+                    continue;
+                }
+
+                // Check if this is a duplicate
+                let is_dup = if let (Some(url), Some(earlier_url)) = (url, earlier_url) {
+                    // URL match
+                    url == earlier_url
+                } else if let (Some(emp), Some(earlier_emp)) = (employer, earlier_employer) {
+                    if emp.to_lowercase() == earlier_emp.to_lowercase() {
+                        let title_norm = normalize_title(title);
+                        let earlier_norm = normalize_title(earlier_title);
+
+                        // Same employer - check title similarity
+                        title_norm == earlier_norm
+                            || title_norm.contains(&earlier_norm)
+                            || earlier_norm.contains(&title_norm)
+                            || strsim::jaro_winkler(&title_norm, &earlier_norm) > 0.8
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if is_dup {
+                    duplicates.push((
+                        *earlier_id,
+                        *job_id,
+                        format!(
+                            "Job #{} ('{}') duplicates job #{} ('{}')",
+                            job_id, title, earlier_id, earlier_title
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        Ok(duplicates)
+    }
+
     pub fn add_job_full(
         &self,
         title: &str,
@@ -718,4 +857,222 @@ fn calculate_score(job: &Job, db: &Database) -> f64 {
     }
 
     score.max(0.0)
+}
+
+/// Normalize title for comparison: trim and lowercase
+fn normalize_title(title: &str) -> String {
+    title.trim().to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_db() -> Result<Database> {
+        let conn = Connection::open_in_memory()?;
+        let db = Database {
+            conn,
+            path: PathBuf::from(":memory:"),
+        };
+        db.init()?;
+        Ok(db)
+    }
+
+    #[test]
+    fn test_exact_title_match_same_employer() -> Result<()> {
+        let db = create_test_db()?;
+
+        // Add first job
+        db.add_job_full(
+            "Staff DevOps Engineer",
+            Some("Wiraa"),
+            None,
+            Some("linkedin"),
+            None,
+            None,
+            None,
+        )?;
+
+        // Check for duplicate with exact same title and employer
+        let duplicate = db.is_duplicate_job("Staff DevOps Engineer", Some("Wiraa"), None)?;
+        assert!(duplicate.is_some(), "Exact match should be detected as duplicate");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_substring_match_same_employer() -> Result<()> {
+        let db = create_test_db()?;
+
+        // Add job with longer title
+        db.add_job_full(
+            "Staff DevOps Engineer, DevInfra",
+            Some("Wiraa"),
+            None,
+            Some("linkedin"),
+            None,
+            None,
+            None,
+        )?;
+
+        // Check for duplicate with shorter title (substring)
+        let duplicate = db.is_duplicate_job("Staff DevOps Engineer", Some("Wiraa"), None)?;
+        assert!(
+            duplicate.is_some(),
+            "Substring match should be detected as duplicate"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_different_employers_not_duplicate() -> Result<()> {
+        let db = create_test_db()?;
+
+        // Add job at Company A
+        db.add_job_full(
+            "DevOps Engineer",
+            Some("Company A"),
+            None,
+            Some("linkedin"),
+            None,
+            None,
+            None,
+        )?;
+
+        // Check for duplicate at Company B
+        let duplicate = db.is_duplicate_job("DevOps Engineer", Some("Company B"), None)?;
+        assert!(
+            duplicate.is_none(),
+            "Same title at different companies should not be duplicate"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fuzzy_match_same_employer() -> Result<()> {
+        let db = create_test_db()?;
+
+        // Add job
+        db.add_job_full(
+            "Senior Software Engineer",
+            Some("Acme Corp"),
+            None,
+            Some("linkedin"),
+            None,
+            None,
+            None,
+        )?;
+
+        // Check for duplicate with very similar title
+        let duplicate = db.is_duplicate_job(
+            "Sr. Software Engineer",
+            Some("Acme Corp"),
+            None,
+        )?;
+        assert!(
+            duplicate.is_some(),
+            "Fuzzy match should detect similar titles"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_url_match_overrides_title() -> Result<()> {
+        let db = create_test_db()?;
+
+        // Add job with URL
+        db.add_job_full(
+            "Job Title A",
+            Some("Company A"),
+            Some("https://example.com/job/123"),
+            Some("linkedin"),
+            None,
+            None,
+            None,
+        )?;
+
+        // Check for duplicate with same URL but different title
+        let duplicate = db.is_duplicate_job(
+            "Job Title B",
+            Some("Company B"),
+            Some("https://example.com/job/123"),
+        )?;
+        assert!(
+            duplicate.is_some(),
+            "URL match should detect duplicate even with different title"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_case_insensitive_matching() -> Result<()> {
+        let db = create_test_db()?;
+
+        // Add job
+        db.add_job_full(
+            "DevOps Engineer",
+            Some("Wiraa"),
+            None,
+            Some("linkedin"),
+            None,
+            None,
+            None,
+        )?;
+
+        // Check for duplicate with different case
+        let duplicate = db.is_duplicate_job("devops engineer", Some("WIRAA"), None)?;
+        assert!(
+            duplicate.is_some(),
+            "Matching should be case-insensitive"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_duplicates() -> Result<()> {
+        let db = create_test_db()?;
+
+        // Add original job
+        db.add_job_full(
+            "DevOps Engineer",
+            Some("Wiraa"),
+            None,
+            Some("linkedin"),
+            None,
+            None,
+            None,
+        )?;
+
+        // Add duplicate
+        db.add_job_full(
+            "DevOps Engineer",
+            Some("Wiraa"),
+            None,
+            Some("indeed"),
+            None,
+            None,
+            None,
+        )?;
+
+        // Add another job at different company (not duplicate)
+        db.add_job_full(
+            "DevOps Engineer",
+            Some("Other Company"),
+            None,
+            Some("linkedin"),
+            None,
+            None,
+            None,
+        )?;
+
+        let duplicates = db.find_duplicates()?;
+        assert_eq!(duplicates.len(), 1, "Should find exactly one duplicate");
+
+        Ok(())
+    }
 }

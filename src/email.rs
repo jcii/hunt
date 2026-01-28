@@ -492,21 +492,14 @@ fn clean_tracking_url(url: &str) -> Option<String> {
 }
 
 fn job_exists(db: &Database, job: &ParsedJob) -> Result<bool> {
-    // Check by URL if present
-    if let Some(ref url) = job.url {
-        if db.job_exists_by_url(url)? {
-            return Ok(true);
-        }
-    }
+    // Use sophisticated duplicate detection
+    let duplicate_id = db.is_duplicate_job(
+        &job.title,
+        job.employer.as_deref(),
+        job.url.as_deref(),
+    )?;
 
-    // Check by title + employer
-    if let Some(ref employer) = job.employer {
-        if db.job_exists_by_title_employer(&job.title, employer)? {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
+    Ok(duplicate_id.is_some())
 }
 
 fn add_job_from_email(db: &Database, job: &ParsedJob) -> Result<i64> {

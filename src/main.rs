@@ -235,28 +235,20 @@ fn cleanup_artifacts(db: &Database, dry_run: bool) -> Result<usize> {
 }
 
 fn cleanup_duplicates(db: &Database, dry_run: bool) -> Result<usize> {
-    let jobs = db.list_jobs(None, None)?;
-    let mut seen: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    let mut removed = 0;
+    // Use sophisticated duplicate detection that handles:
+    // - Exact matches (case-insensitive)
+    // - Substring matches
+    // - Fuzzy matching (>80% similar via Jaro-Winkler)
+    // - URL-based deduplication
+    let duplicates = db.find_duplicates()?;
 
-    // Group by (title, employer) - keep the first one (lowest ID)
-    for job in jobs {
-        let employer = job.employer_name.as_deref().unwrap_or("");
-        let key = format!("{}|||{}", job.title.to_lowercase(), employer.to_lowercase());
-
-        if seen.contains_key(&key) {
-            // This is a duplicate - remove it
-            if !dry_run {
-                db.delete_job(job.id)?;
-            }
-            removed += 1;
-        } else {
-            // First occurrence - remember it
-            seen.insert(key, job.id);
+    if !dry_run {
+        for (_, duplicate_id, _) in &duplicates {
+            db.delete_job(*duplicate_id)?;
         }
     }
 
-    Ok(removed)
+    Ok(duplicates.len())
 }
 
 fn main() -> Result<()> {
