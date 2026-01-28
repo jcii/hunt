@@ -34,3 +34,24 @@ pub struct JobSnapshot {
     pub raw_text: String,
     pub captured_at: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BaseResume {
+    pub id: i64,
+    pub name: String,
+    pub format: String, // "markdown", "plain", "json", "latex"
+    pub content: String,
+    pub notes: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResumeVariant {
+    pub id: i64,
+    pub base_resume_id: i64,
+    pub job_id: i64,
+    pub content: String,
+    pub tailoring_notes: Option<String>,
+    pub created_at: String,
+}

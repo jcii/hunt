@@ -2,10 +2,11 @@ mod db;
 mod email;
 mod models;
 
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use db::Database;
 use email::{EmailConfig, EmailIngester};
+use models::{BaseResume, Job};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -75,6 +76,12 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Manage resumes
+    Resume {
+        #[command(subcommand)]
+        command: ResumeCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -108,6 +115,55 @@ enum EmployerCommands {
     Show {
         /// Employer name or ID
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ResumeCommands {
+    /// Add a base resume
+    Add {
+        /// Name for this resume
+        name: String,
+
+        /// Format (markdown, plain, json, latex)
+        #[arg(short, long, default_value = "markdown")]
+        format: String,
+
+        /// Path to resume file
+        file: PathBuf,
+
+        /// Optional notes about this resume
+        #[arg(short, long)]
+        notes: Option<String>,
+    },
+
+    /// List base resumes
+    List,
+
+    /// Show a base resume
+    Show {
+        /// Resume name or ID
+        name: String,
+    },
+
+    /// Generate a tailored resume variant for a job
+    Tailor {
+        /// Job ID to tailor resume for
+        job_id: i64,
+
+        /// Base resume name or ID
+        #[arg(short, long)]
+        resume: String,
+
+        /// Output file path
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
+    /// List resume variants for a job
+    Variants {
+        /// Job ID
+        job_id: i64,
     },
 }
 
@@ -308,9 +364,156 @@ fn main() -> Result<()> {
                 println!("\n(Dry run - no jobs were actually added)");
             }
         }
+
+        Commands::Resume { command } => {
+            db.ensure_initialized()?;
+            match command {
+                ResumeCommands::Add {
+                    name,
+                    format,
+                    file,
+                    notes,
+                } => {
+                    let content = std::fs::read_to_string(&file)
+                        .with_context(|| format!("Failed to read resume file: {}", file.display()))?;
+
+                    let resume_id = db.create_base_resume(&name, &format, &content, notes.as_deref())?;
+                    println!("Added base resume '{}' (ID: {})", name, resume_id);
+                }
+
+                ResumeCommands::List => {
+                    let resumes = db.list_base_resumes()?;
+                    if resumes.is_empty() {
+                        println!("No base resumes found.");
+                    } else {
+                        println!("{:<6} {:<20} {:<10} {:<20}", "ID", "NAME", "FORMAT", "UPDATED");
+                        println!("{}", "-".repeat(58));
+                        for resume in resumes {
+                            println!(
+                                "{:<6} {:<20} {:<10} {:<20}",
+                                resume.id,
+                                truncate(&resume.name, 18),
+                                resume.format,
+                                truncate(&resume.updated_at, 18)
+                            );
+                        }
+                    }
+                }
+
+                ResumeCommands::Show { name } => {
+                    let resume = if let Ok(id) = name.parse::<i64>() {
+                        db.get_base_resume(id)?
+                    } else {
+                        db.get_base_resume_by_name(&name)?
+                    };
+
+                    match resume {
+                        Some(resume) => {
+                            println!("Resume '{}' (ID: {})", resume.name, resume.id);
+                            println!("Format: {}", resume.format);
+                            if let Some(notes) = &resume.notes {
+                                println!("Notes: {}", notes);
+                            }
+                            println!("Created: {}", resume.created_at);
+                            println!("Updated: {}", resume.updated_at);
+                            println!("\n--- Content ---\n{}", resume.content);
+                        }
+                        None => {
+                            println!("Resume '{}' not found.", name);
+                        }
+                    }
+                }
+
+                ResumeCommands::Tailor {
+                    job_id,
+                    resume,
+                    output,
+                } => {
+                    let job = db.get_job(job_id)?
+                        .ok_or_else(|| anyhow!("Job #{} not found", job_id))?;
+
+                    let base_resume = if let Ok(id) = resume.parse::<i64>() {
+                        db.get_base_resume(id)?
+                    } else {
+                        db.get_base_resume_by_name(&resume)?
+                    }
+                    .ok_or_else(|| anyhow!("Resume '{}' not found", resume))?;
+
+                    let tailored_content = tailor_resume_for_job(&base_resume, &job)?;
+                    let notes = format!("Tailored for: {}", job.title);
+
+                    let variant_id = db.create_resume_variant(
+                        base_resume.id,
+                        job_id,
+                        &tailored_content,
+                        Some(&notes),
+                    )?;
+
+                    if let Some(out_path) = output {
+                        std::fs::write(&out_path, &tailored_content)
+                            .with_context(|| format!("Failed to write to {}", out_path.display()))?;
+                        println!("Tailored resume saved to: {}", out_path.display());
+                    } else {
+                        println!("Tailored resume for job #{} (variant ID: {})", job_id, variant_id);
+                        println!("\n--- Tailored Resume ---\n{}", tailored_content);
+                    }
+                }
+
+                ResumeCommands::Variants { job_id } => {
+                    let variants = db.list_resume_variants_for_job(job_id)?;
+                    if variants.is_empty() {
+                        println!("No resume variants found for job #{}.", job_id);
+                    } else {
+                        println!("{:<6} {:<15} {:<20}", "ID", "BASE RESUME", "CREATED");
+                        println!("{}", "-".repeat(43));
+                        for variant in variants {
+                            let base_resume = db.get_base_resume(variant.base_resume_id)?
+                                .ok_or_else(|| anyhow!("Base resume not found"))?;
+                            println!(
+                                "{:<6} {:<15} {:<20}",
+                                variant.id,
+                                truncate(&base_resume.name, 13),
+                                truncate(&variant.created_at, 18)
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+fn tailor_resume_for_job(base_resume: &BaseResume, job: &Job) -> Result<String> {
+    let mut tailored = String::new();
+
+    tailored.push_str(&format!("# Resume - Tailored for: {}\n\n", job.title));
+
+    if let Some(employer) = &job.employer_name {
+        tailored.push_str(&format!("**Position**: {} at {}\n\n", job.title, employer));
+    } else {
+        tailored.push_str(&format!("**Position**: {}\n\n", job.title));
+    }
+
+    if job.pay_min.is_some() || job.pay_max.is_some() {
+        let pay_range = match (job.pay_min, job.pay_max) {
+            (Some(min), Some(max)) => format!("${} - ${}", min, max),
+            (Some(min), None) => format!("${}+", min),
+            (None, Some(max)) => format!("up to ${}", max),
+            (None, None) => "Not specified".to_string(),
+        };
+        tailored.push_str(&format!("**Compensation**: {}\n\n", pay_range));
+    }
+
+    tailored.push_str("---\n\n");
+    tailored.push_str(&base_resume.content);
+
+    tailored.push_str("\n\n---\n");
+    tailored.push_str(&format!("\n*Tailored from base resume: {}*\n", base_resume.name));
+    tailored.push_str(&format!("*Generated: {}*\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
+
+    Ok(tailored)
 }
 
 fn truncate(s: &str, max: usize) -> String {

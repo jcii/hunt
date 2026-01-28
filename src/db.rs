@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
 
-use crate::models::{Employer, Job};
+use crate::models::{BaseResume, Employer, Job, ResumeVariant};
 
 pub struct Database {
     conn: Connection,
@@ -70,6 +70,29 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_jobs_employer ON jobs(employer_id);
             CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
             CREATE INDEX IF NOT EXISTS idx_snapshots_job ON job_snapshots(job_id);
+
+            CREATE TABLE IF NOT EXISTS base_resumes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                format TEXT NOT NULL CHECK (format IN ('markdown', 'plain', 'json', 'latex')),
+                content TEXT NOT NULL,
+                notes TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS resume_variants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                base_resume_id INTEGER NOT NULL REFERENCES base_resumes(id),
+                job_id INTEGER NOT NULL REFERENCES jobs(id),
+                content TEXT NOT NULL,
+                tailoring_notes TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(base_resume_id, job_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_variants_base ON resume_variants(base_resume_id);
+            CREATE INDEX IF NOT EXISTS idx_variants_job ON resume_variants(job_id);
             "#,
         )?;
         Ok(())
@@ -357,6 +380,204 @@ impl Database {
         }
 
         Ok(job_id)
+    }
+
+    // --- Base Resume operations ---
+
+    pub fn create_base_resume(
+        &self,
+        name: &str,
+        format: &str,
+        content: &str,
+        notes: Option<&str>,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO base_resumes (name, format, content, notes)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![name, format, content, notes],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_base_resumes(&self) -> Result<Vec<BaseResume>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, format, content, notes, created_at, updated_at
+             FROM base_resumes
+             ORDER BY updated_at DESC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(BaseResume {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                format: row.get(2)?,
+                content: row.get(3)?,
+                notes: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list base resumes")
+    }
+
+    pub fn get_base_resume(&self, id: i64) -> Result<Option<BaseResume>> {
+        let result = self.conn.query_row(
+            "SELECT id, name, format, content, notes, created_at, updated_at
+             FROM base_resumes WHERE id = ?1",
+            [id],
+            |row| {
+                Ok(BaseResume {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    format: row.get(2)?,
+                    content: row.get(3)?,
+                    notes: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            },
+        );
+        match result {
+            Ok(resume) => Ok(Some(resume)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn get_base_resume_by_name(&self, name: &str) -> Result<Option<BaseResume>> {
+        let result = self.conn.query_row(
+            "SELECT id, name, format, content, notes, created_at, updated_at
+             FROM base_resumes WHERE name = ?1",
+            [name],
+            |row| {
+                Ok(BaseResume {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    format: row.get(2)?,
+                    content: row.get(3)?,
+                    notes: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            },
+        );
+        match result {
+            Ok(resume) => Ok(Some(resume)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn update_base_resume(
+        &self,
+        id: i64,
+        name: Option<&str>,
+        format: Option<&str>,
+        content: Option<&str>,
+        notes: Option<&str>,
+    ) -> Result<()> {
+        let mut updates = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(n) = name {
+            updates.push("name = ?");
+            params.push(Box::new(n.to_string()));
+        }
+        if let Some(f) = format {
+            updates.push("format = ?");
+            params.push(Box::new(f.to_string()));
+        }
+        if let Some(c) = content {
+            updates.push("content = ?");
+            params.push(Box::new(c.to_string()));
+        }
+        if let Some(n) = notes {
+            updates.push("notes = ?");
+            params.push(Box::new(n.to_string()));
+        }
+
+        if updates.is_empty() {
+            return Ok(());
+        }
+
+        updates.push("updated_at = datetime('now')");
+        params.push(Box::new(id));
+
+        let sql = format!(
+            "UPDATE base_resumes SET {} WHERE id = ?",
+            updates.join(", ")
+        );
+
+        let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        self.conn.execute(&sql, params_ref.as_slice())?;
+        Ok(())
+    }
+
+    // --- Resume Variant operations ---
+
+    pub fn create_resume_variant(
+        &self,
+        base_resume_id: i64,
+        job_id: i64,
+        content: &str,
+        tailoring_notes: Option<&str>,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO resume_variants (base_resume_id, job_id, content, tailoring_notes)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(base_resume_id, job_id) DO UPDATE SET
+                content = excluded.content,
+                tailoring_notes = excluded.tailoring_notes",
+            params![base_resume_id, job_id, content, tailoring_notes],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn get_resume_variant(&self, job_id: i64, base_resume_id: i64) -> Result<Option<ResumeVariant>> {
+        let result = self.conn.query_row(
+            "SELECT id, base_resume_id, job_id, content, tailoring_notes, created_at
+             FROM resume_variants WHERE job_id = ?1 AND base_resume_id = ?2",
+            params![job_id, base_resume_id],
+            |row| {
+                Ok(ResumeVariant {
+                    id: row.get(0)?,
+                    base_resume_id: row.get(1)?,
+                    job_id: row.get(2)?,
+                    content: row.get(3)?,
+                    tailoring_notes: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            },
+        );
+        match result {
+            Ok(variant) => Ok(Some(variant)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn list_resume_variants_for_job(&self, job_id: i64) -> Result<Vec<ResumeVariant>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, base_resume_id, job_id, content, tailoring_notes, created_at
+             FROM resume_variants WHERE job_id = ?1
+             ORDER BY created_at DESC",
+        )?;
+
+        let rows = stmt.query_map([job_id], |row| {
+            Ok(ResumeVariant {
+                id: row.get(0)?,
+                base_resume_id: row.get(1)?,
+                job_id: row.get(2)?,
+                content: row.get(3)?,
+                tailoring_notes: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list resume variants")
     }
 }
 
