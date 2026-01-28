@@ -1,9 +1,12 @@
 mod db;
+mod email;
 mod models;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use db::Database;
+use email::{EmailConfig, EmailIngester};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "hunt")]
@@ -52,6 +55,25 @@ enum Commands {
         /// Number of jobs to show
         #[arg(short, long, default_value = "10")]
         limit: usize,
+    },
+
+    /// Fetch job alerts from email
+    Email {
+        /// Gmail address
+        #[arg(short, long, default_value = "jciispam@gmail.com")]
+        username: String,
+
+        /// Path to app password file
+        #[arg(short, long, default_value = "~/.gmail.app_password.txt")]
+        password_file: String,
+
+        /// Number of days to look back
+        #[arg(short, long, default_value = "7")]
+        days: u32,
+
+        /// Dry run - show what would be added without adding
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -249,6 +271,41 @@ fn main() -> Result<()> {
                         score
                     );
                 }
+            }
+        }
+
+        Commands::Email {
+            username,
+            password_file,
+            days,
+            dry_run,
+        } => {
+            db.ensure_initialized()?;
+
+            // Expand ~ in path
+            let password_path = if password_file.starts_with("~/") {
+                let home = std::env::var("HOME").unwrap_or_default();
+                PathBuf::from(format!("{}/{}", home, &password_file[2..]))
+            } else {
+                PathBuf::from(&password_file)
+            };
+
+            println!("Connecting to Gmail as {}...", username);
+            let config = EmailConfig::from_gmail_password_file(&username, &password_path)?;
+            let ingester = EmailIngester::new(config);
+
+            println!("Searching for job alerts from the last {} days...", days);
+            let stats = ingester.fetch_job_alerts(&db, days, dry_run)?;
+
+            println!("\nResults:");
+            println!("  Emails found: {}", stats.emails_found);
+            println!("  Jobs added:   {}", stats.jobs_added);
+            if stats.errors > 0 {
+                println!("  Errors:       {}", stats.errors);
+            }
+
+            if dry_run {
+                println!("\n(Dry run - no jobs were actually added)");
             }
         }
     }

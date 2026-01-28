@@ -11,3 +11,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 directories = "5"
+imap = "2"
+native-tls = "0.2"
+mailparse = "0.15"
+scraper = "0.22"
+regex = "1"

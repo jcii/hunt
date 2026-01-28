@@ -1,0 +1,452 @@
+use anyhow::{anyhow, Context, Result};
+use mailparse::{parse_mail, MailHeaderMap};
+use scraper::{Html, Selector};
+use std::collections::HashSet;
+use std::fs;
+use std::path::Path;
+
+use crate::db::Database;
+
+pub struct EmailConfig {
+    pub server: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+}
+
+impl EmailConfig {
+    pub fn gmail(username: &str, app_password: &str) -> Self {
+        Self {
+            server: "imap.gmail.com".to_string(),
+            port: 993,
+            username: username.to_string(),
+            password: app_password.trim().to_string(),
+        }
+    }
+
+    pub fn from_gmail_password_file(username: &str, password_file: &Path) -> Result<Self> {
+        let password = fs::read_to_string(password_file)
+            .with_context(|| format!("Failed to read password file: {:?}", password_file))?;
+        Ok(Self::gmail(username, &password))
+    }
+}
+
+pub struct EmailIngester {
+    config: EmailConfig,
+}
+
+impl EmailIngester {
+    pub fn new(config: EmailConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn fetch_job_alerts(&self, db: &Database, days: u32, dry_run: bool) -> Result<IngestStats> {
+        let tls = native_tls::TlsConnector::builder().build()?;
+        let client = imap::connect(
+            (self.config.server.as_str(), self.config.port),
+            &self.config.server,
+            &tls,
+        )?;
+
+        let mut session = client
+            .login(&self.config.username, &self.config.password)
+            .map_err(|e| anyhow!("Login failed: {}", e.0))?;
+
+        // Select inbox
+        session.select("INBOX")?;
+
+        // Search for job alert emails from the last N days
+        let since_date = chrono::Utc::now() - chrono::Duration::days(days as i64);
+        let date_str = since_date.format("%d-%b-%Y").to_string();
+
+        // Search for LinkedIn and Indeed job alerts
+        let search_queries = vec![
+            format!("FROM \"jobs-noreply@linkedin.com\" SINCE {}", date_str),
+            format!("FROM \"linkedin.com\" SUBJECT \"job\" SINCE {}", date_str),
+            format!("FROM \"indeed.com\" SINCE {}", date_str),
+            format!("FROM \"alert\" SUBJECT \"job\" SINCE {}", date_str),
+        ];
+
+        let mut stats = IngestStats::default();
+        let mut seen_message_ids: HashSet<String> = HashSet::new();
+
+        for query in &search_queries {
+            let message_ids = match session.search(query) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    eprintln!("Search query failed: {} - {}", query, e);
+                    continue;
+                }
+            };
+
+            for id in message_ids.iter() {
+                let id_str = id.to_string();
+                if seen_message_ids.contains(&id_str) {
+                    continue;
+                }
+                seen_message_ids.insert(id_str);
+
+                stats.emails_found += 1;
+
+                let messages = session.fetch(id.to_string(), "RFC822")?;
+                for message in messages.iter() {
+                    if let Some(body) = message.body() {
+                        match self.process_email(body, db, dry_run) {
+                            Ok(jobs_added) => {
+                                stats.jobs_added += jobs_added;
+                            }
+                            Err(e) => {
+                                stats.errors += 1;
+                                eprintln!("Error processing email: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        session.logout()?;
+        Ok(stats)
+    }
+
+    fn process_email(&self, raw: &[u8], db: &Database, dry_run: bool) -> Result<usize> {
+        let parsed = parse_mail(raw)?;
+
+        let from = parsed
+            .headers
+            .get_first_value("From")
+            .unwrap_or_default()
+            .to_lowercase();
+        let subject = parsed
+            .headers
+            .get_first_value("Subject")
+            .unwrap_or_default();
+
+        // Get email body (prefer HTML)
+        let body = get_email_body(&parsed)?;
+
+        // Determine source and parse accordingly
+        let jobs = if from.contains("linkedin.com") {
+            parse_linkedin_email(&subject, &body)?
+        } else if from.contains("indeed.com") {
+            parse_indeed_email(&subject, &body)?
+        } else {
+            // Generic parsing
+            parse_generic_job_email(&subject, &body)?
+        };
+
+        let mut added = 0;
+        for job in jobs {
+            if dry_run {
+                println!(
+                    "[DRY RUN] Would add: {} at {} ({})",
+                    job.title,
+                    job.employer.as_deref().unwrap_or("Unknown"),
+                    job.source
+                );
+            } else {
+                // Check for duplicates by URL or title+employer
+                if !job_exists(db, &job)? {
+                    add_job_from_email(db, &job)?;
+                    added += 1;
+                }
+            }
+        }
+
+        Ok(added)
+    }
+}
+
+fn get_email_body(parsed: &mailparse::ParsedMail) -> Result<String> {
+    // Try to find HTML part first, then plain text
+    if parsed.subparts.is_empty() {
+        // Single part email
+        let body = parsed.get_body()?;
+        return Ok(body);
+    }
+
+    // Multipart email - look for HTML
+    for part in &parsed.subparts {
+        let content_type = part
+            .headers
+            .get_first_value("Content-Type")
+            .unwrap_or_default();
+        if content_type.contains("text/html") {
+            return Ok(part.get_body()?);
+        }
+    }
+
+    // Fallback to plain text
+    for part in &parsed.subparts {
+        let content_type = part
+            .headers
+            .get_first_value("Content-Type")
+            .unwrap_or_default();
+        if content_type.contains("text/plain") {
+            return Ok(part.get_body()?);
+        }
+    }
+
+    // Last resort - first part
+    if let Some(part) = parsed.subparts.first() {
+        return Ok(part.get_body()?);
+    }
+
+    Err(anyhow!("No email body found"))
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedJob {
+    pub title: String,
+    pub employer: Option<String>,
+    pub url: Option<String>,
+    pub location: Option<String>,
+    pub pay_min: Option<i64>,
+    pub pay_max: Option<i64>,
+    pub source: String,
+    pub raw_text: String,
+}
+
+fn parse_linkedin_email(subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
+    let mut jobs = Vec::new();
+    let document = Html::parse_document(body);
+
+    // LinkedIn job alert emails have job cards with specific structure
+    // Try multiple selectors as LinkedIn changes their email format
+
+    // Selector for job titles (usually in <a> tags with job URLs)
+    let job_link_selector = Selector::parse("a[href*='linkedin.com/comm/jobs']").ok();
+    let job_card_selector = Selector::parse("table[role='presentation']").ok();
+
+    // Try to extract from links first
+    if let Some(ref selector) = job_link_selector {
+        for element in document.select(selector) {
+            let href = element.value().attr("href").unwrap_or("");
+            let text = element.text().collect::<Vec<_>>().join(" ");
+            let text = text.trim();
+
+            if text.is_empty() || text.len() < 5 {
+                continue;
+            }
+
+            // Skip non-job links
+            if text.to_lowercase().contains("view all")
+                || text.to_lowercase().contains("unsubscribe")
+            {
+                continue;
+            }
+
+            // Try to parse "Title at Company" or just title
+            let (title, employer) = parse_title_at_company(text);
+
+            if !title.is_empty() {
+                jobs.push(ParsedJob {
+                    title,
+                    employer,
+                    url: clean_tracking_url(href),
+                    location: None,
+                    pay_min: None,
+                    pay_max: None,
+                    source: "linkedin".to_string(),
+                    raw_text: text.to_string(),
+                });
+            }
+        }
+    }
+
+    // If no jobs found, try generic text extraction
+    if jobs.is_empty() {
+        // Extract text and look for patterns
+        let text = document.root_element().text().collect::<Vec<_>>().join(" ");
+        jobs.extend(extract_jobs_from_text(&text, "linkedin")?);
+    }
+
+    // Deduplicate by title
+    jobs.dedup_by(|a, b| a.title.to_lowercase() == b.title.to_lowercase());
+
+    Ok(jobs)
+}
+
+fn parse_indeed_email(subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
+    let mut jobs = Vec::new();
+    let document = Html::parse_document(body);
+
+    // Indeed emails typically have job links
+    let job_link_selector = Selector::parse("a[href*='indeed.com']").ok();
+
+    if let Some(ref selector) = job_link_selector {
+        for element in document.select(selector) {
+            let href = element.value().attr("href").unwrap_or("");
+            let text = element.text().collect::<Vec<_>>().join(" ");
+            let text = text.trim();
+
+            // Skip navigation/utility links
+            if text.is_empty()
+                || text.len() < 5
+                || text.to_lowercase().contains("unsubscribe")
+                || text.to_lowercase().contains("view all")
+                || text.to_lowercase().contains("privacy")
+            {
+                continue;
+            }
+
+            // Check if this looks like a job link
+            if href.contains("/viewjob") || href.contains("/rc/clk") || href.contains("jk=") {
+                let (title, employer) = parse_title_at_company(text);
+
+                if !title.is_empty() {
+                    jobs.push(ParsedJob {
+                        title,
+                        employer,
+                        url: clean_tracking_url(href),
+                        location: None,
+                        pay_min: None,
+                        pay_max: None,
+                        source: "indeed".to_string(),
+                        raw_text: text.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Deduplicate
+    jobs.dedup_by(|a, b| a.title.to_lowercase() == b.title.to_lowercase());
+
+    Ok(jobs)
+}
+
+fn parse_generic_job_email(subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
+    let document = Html::parse_document(body);
+    let text = document.root_element().text().collect::<Vec<_>>().join(" ");
+    extract_jobs_from_text(&text, "email")
+}
+
+fn extract_jobs_from_text(text: &str, source: &str) -> Result<Vec<ParsedJob>> {
+    let mut jobs = Vec::new();
+
+    // Look for common job title patterns
+    let title_patterns = [
+        r"(?i)(senior|staff|principal|lead|junior|sr\.?|jr\.?)?\s*(software|devops|platform|infrastructure|site reliability|sre|cloud|backend|frontend|full[- ]?stack|data|ml|machine learning)\s*(engineer|developer|architect|manager|lead|specialist)",
+    ];
+
+    let re = regex::Regex::new(title_patterns[0])?;
+
+    for cap in re.captures_iter(text) {
+        let title = cap.get(0).map(|m| m.as_str().trim().to_string());
+        if let Some(t) = title {
+            if t.len() > 5 {
+                jobs.push(ParsedJob {
+                    title: t,
+                    employer: None,
+                    url: None,
+                    location: None,
+                    pay_min: None,
+                    pay_max: None,
+                    source: source.to_string(),
+                    raw_text: text.chars().take(500).collect(),
+                });
+            }
+        }
+    }
+
+    jobs.dedup_by(|a, b| a.title.to_lowercase() == b.title.to_lowercase());
+    Ok(jobs)
+}
+
+fn parse_title_at_company(text: &str) -> (String, Option<String>) {
+    // Common patterns:
+    // "Software Engineer at Google"
+    // "Software Engineer, Google"
+    // "Software Engineer - Google"
+
+    let text = text.trim();
+
+    // Try " at " pattern
+    if let Some(idx) = text.to_lowercase().find(" at ") {
+        let title = text[..idx].trim().to_string();
+        let employer = text[idx + 4..].trim().to_string();
+        if !employer.is_empty() {
+            return (title, Some(employer));
+        }
+    }
+
+    // Try " - " pattern (but be careful with job title hyphens)
+    if let Some(idx) = text.rfind(" - ") {
+        let title = text[..idx].trim().to_string();
+        let employer = text[idx + 3..].trim().to_string();
+        // Only use if employer part doesn't look like part of title
+        if !employer.is_empty()
+            && !employer.to_lowercase().contains("engineer")
+            && !employer.to_lowercase().contains("developer")
+        {
+            return (title, Some(employer));
+        }
+    }
+
+    // Try ", " pattern (last comma)
+    if let Some(idx) = text.rfind(", ") {
+        let potential_employer = text[idx + 2..].trim();
+        // Check if it looks like a company (not a location indicator)
+        if !potential_employer.is_empty()
+            && potential_employer.len() < 50
+            && !potential_employer.contains("Remote")
+            && !potential_employer.contains("Hybrid")
+        {
+            let title = text[..idx].trim().to_string();
+            return (title, Some(potential_employer.to_string()));
+        }
+    }
+
+    // No pattern matched - just return title
+    (text.to_string(), None)
+}
+
+fn clean_tracking_url(url: &str) -> Option<String> {
+    // LinkedIn and Indeed wrap URLs in tracking redirects
+    // Try to extract the actual job URL
+    if url.is_empty() {
+        return None;
+    }
+
+    // For now, just return the URL as-is
+    // TODO: Parse out actual destination from tracking URLs
+    Some(url.to_string())
+}
+
+fn job_exists(db: &Database, job: &ParsedJob) -> Result<bool> {
+    // Check by URL if present
+    if let Some(ref url) = job.url {
+        if db.job_exists_by_url(url)? {
+            return Ok(true);
+        }
+    }
+
+    // Check by title + employer
+    if let Some(ref employer) = job.employer {
+        if db.job_exists_by_title_employer(&job.title, employer)? {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn add_job_from_email(db: &Database, job: &ParsedJob) -> Result<i64> {
+    db.add_job_full(
+        &job.title,
+        job.employer.as_deref(),
+        job.url.as_deref(),
+        Some(&job.source),
+        job.pay_min,
+        job.pay_max,
+        Some(&job.raw_text),
+    )
+}
+
+#[derive(Debug, Default)]
+pub struct IngestStats {
+    pub emails_found: usize,
+    pub jobs_added: usize,
+    pub errors: usize,
+}

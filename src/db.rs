@@ -301,6 +301,63 @@ impl Database {
         )?;
         Ok(status)
     }
+
+    // --- Email ingestion support ---
+
+    pub fn job_exists_by_url(&self, url: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM jobs WHERE url = ?1",
+            [url],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn job_exists_by_title_employer(&self, title: &str, employer: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM jobs j
+             JOIN employers e ON j.employer_id = e.id
+             WHERE LOWER(j.title) = LOWER(?1) AND LOWER(e.name) = LOWER(?2)",
+            params![title, employer],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn add_job_full(
+        &self,
+        title: &str,
+        employer: Option<&str>,
+        url: Option<&str>,
+        source: Option<&str>,
+        pay_min: Option<i64>,
+        pay_max: Option<i64>,
+        raw_text: Option<&str>,
+    ) -> Result<i64> {
+        let employer_id = if let Some(name) = employer {
+            Some(self.get_or_create_employer(name)?)
+        } else {
+            None
+        };
+
+        self.conn.execute(
+            "INSERT INTO jobs (employer_id, title, url, source, pay_min, pay_max, raw_text)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![employer_id, title, url, source, pay_min, pay_max, raw_text],
+        )?;
+
+        let job_id = self.conn.last_insert_rowid();
+
+        // Create initial snapshot if we have raw text
+        if let Some(text) = raw_text {
+            self.conn.execute(
+                "INSERT INTO job_snapshots (job_id, raw_text) VALUES (?1, ?2)",
+                params![job_id, text],
+            )?;
+        }
+
+        Ok(job_id)
+    }
 }
 
 // --- Helper functions for parsing job content ---
