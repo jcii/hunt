@@ -1276,7 +1276,7 @@ fn extract_job_code(content: &str) -> Option<String> {
     None
 }
 
-fn extract_pay_range(content: &str) -> (Option<i64>, Option<i64>) {
+pub fn extract_pay_range(content: &str) -> (Option<i64>, Option<i64>) {
     // Look for salary patterns like "$150,000 - $200,000" or "$150k-200k"
     let re_patterns = [
         r"\$(\d{2,3}),?(\d{3})\s*[-–to]+\s*\$(\d{2,3}),?(\d{3})",  // $150,000 - $200,000

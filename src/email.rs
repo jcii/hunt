@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use crate::db::Database;
+use crate::db::{Database, extract_pay_range};
 
 pub struct EmailConfig {
     pub server: String,
@@ -279,13 +279,14 @@ fn parse_linkedin_email(subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
             };
 
             if !title.is_empty() {
+                let (pay_min, pay_max) = extract_pay_range(text);
                 jobs.push(ParsedJob {
                     title,
                     employer,
                     url: clean_tracking_url(href),
                     location,
-                    pay_min: None,
-                    pay_max: None,
+                    pay_min,
+                    pay_max,
                     source: "linkedin".to_string(),
                     raw_text: text.to_string(),
                 });
@@ -333,13 +334,14 @@ fn parse_indeed_email(subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
                 let (title, employer) = parse_title_at_company(text);
 
                 if !title.is_empty() {
+                    let (pay_min, pay_max) = extract_pay_range(text);
                     jobs.push(ParsedJob {
                         title,
                         employer,
                         url: clean_tracking_url(href),
                         location: None,
-                        pay_min: None,
-                        pay_max: None,
+                        pay_min,
+                        pay_max,
                         source: "indeed".to_string(),
                         raw_text: text.to_string(),
                     });
@@ -374,13 +376,14 @@ fn extract_jobs_from_text(text: &str, source: &str) -> Result<Vec<ParsedJob>> {
         let title = cap.get(0).map(|m| m.as_str().trim().to_string());
         if let Some(t) = title {
             if t.len() > 5 {
+                let (pay_min, pay_max) = extract_pay_range(text);
                 jobs.push(ParsedJob {
                     title: t,
                     employer: None,
                     url: None,
                     location: None,
-                    pay_min: None,
-                    pay_max: None,
+                    pay_min,
+                    pay_max,
                     source: source.to_string(),
                     raw_text: text.chars().take(500).collect(),
                 });
