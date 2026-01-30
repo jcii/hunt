@@ -481,14 +481,19 @@ fn parse_title_at_company(text: &str) -> (String, Option<String>) {
 
 fn clean_tracking_url(url: &str) -> Option<String> {
     // LinkedIn and Indeed wrap URLs in tracking redirects
-    // Try to extract the actual job URL
+    // Strip query parameters (everything after ?) as they are tracking garbage
     if url.is_empty() {
         return None;
     }
 
-    // For now, just return the URL as-is
-    // TODO: Parse out actual destination from tracking URLs
-    Some(url.to_string())
+    // Remove everything after the ? (query parameters)
+    let clean_url = if let Some(idx) = url.find('?') {
+        &url[..idx]
+    } else {
+        url
+    };
+
+    Some(clean_url.to_string())
 }
 
 fn job_exists(db: &Database, job: &ParsedJob) -> Result<bool> {
@@ -639,5 +644,39 @@ mod tests {
         assert!(is_navigation_artifact(""));
         // Whitespace only should be filtered (trimmed to empty)
         assert!(is_navigation_artifact("   "));
+    }
+
+    #[test]
+    fn test_clean_tracking_url_strips_query_params() {
+        // Test with query parameters
+        let url1 = "https://www.linkedin.com/jobs/view/123456?refId=abcd&trackingId=xyz";
+        assert_eq!(
+            clean_tracking_url(url1),
+            Some("https://www.linkedin.com/jobs/view/123456".to_string())
+        );
+
+        // Test with Indeed URL
+        let url2 = "https://www.indeed.com/viewjob?jk=123&tk=456&from=email";
+        assert_eq!(
+            clean_tracking_url(url2),
+            Some("https://www.indeed.com/viewjob".to_string())
+        );
+
+        // Test URL without query params (should remain unchanged)
+        let url3 = "https://jobs.example.com/posting/12345";
+        assert_eq!(
+            clean_tracking_url(url3),
+            Some("https://jobs.example.com/posting/12345".to_string())
+        );
+
+        // Test empty URL
+        assert_eq!(clean_tracking_url(""), None);
+
+        // Test URL with fragment after query (should strip both)
+        let url4 = "https://example.com/job?id=123#section";
+        assert_eq!(
+            clean_tracking_url(url4),
+            Some("https://example.com/job".to_string())
+        );
     }
 }
