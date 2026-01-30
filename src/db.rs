@@ -92,6 +92,7 @@ impl Database {
                 status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'reviewing', 'applied', 'rejected', 'closed')),
                 pay_min INTEGER,
                 pay_max INTEGER,
+                job_code TEXT,
                 raw_text TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -205,6 +206,19 @@ impl Database {
                 ALTER TABLE employers ADD COLUMN ownership_type TEXT;
                 ALTER TABLE employers ADD COLUMN ownership_research_updated TEXT;
                 "#,
+            )?;
+        }
+
+        // Check if job_code column exists in jobs table
+        let job_columns: Vec<String> = self.conn
+            .prepare("PRAGMA table_info(jobs)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if !job_columns.contains(&"job_code".to_string()) {
+            self.conn.execute(
+                "ALTER TABLE jobs ADD COLUMN job_code TEXT",
+                [],
             )?;
         }
 
@@ -465,11 +479,12 @@ impl Database {
         };
 
         let (pay_min, pay_max) = extract_pay_range(content);
+        let job_code = extract_job_code(content);
 
         self.conn.execute(
-            "INSERT INTO jobs (employer_id, title, raw_text, pay_min, pay_max)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![employer_id, title, content, pay_min, pay_max],
+            "INSERT INTO jobs (employer_id, title, raw_text, pay_min, pay_max, job_code)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![employer_id, title, content, pay_min, pay_max, job_code],
         )?;
 
         let job_id = self.conn.last_insert_rowid();
@@ -486,7 +501,7 @@ impl Database {
     pub fn list_jobs(&self, status: Option<&str>, employer: Option<&str>) -> Result<Vec<Job>> {
         let mut sql = String::from(
             "SELECT j.id, j.employer_id, e.name, j.title, j.url, j.source, j.status,
-                    j.pay_min, j.pay_max, j.raw_text, j.created_at, j.updated_at
+                    j.pay_min, j.pay_max, j.job_code, j.raw_text, j.created_at, j.updated_at
              FROM jobs j
              LEFT JOIN employers e ON j.employer_id = e.id
              WHERE 1=1",
@@ -522,7 +537,7 @@ impl Database {
     pub fn get_job(&self, id: i64) -> Result<Option<Job>> {
         let result = self.conn.query_row(
             "SELECT j.id, j.employer_id, e.name, j.title, j.url, j.source, j.status,
-                    j.pay_min, j.pay_max, j.raw_text, j.created_at, j.updated_at
+                    j.pay_min, j.pay_max, j.job_code, j.raw_text, j.created_at, j.updated_at
              FROM jobs j
              LEFT JOIN employers e ON j.employer_id = e.id
              WHERE j.id = ?1",
@@ -567,9 +582,10 @@ impl Database {
             status: row.get(6)?,
             pay_min: row.get(7)?,
             pay_max: row.get(8)?,
-            raw_text: row.get(9)?,
-            created_at: row.get(10)?,
-            updated_at: row.get(11)?,
+            job_code: row.get(9)?,
+            raw_text: row.get(10)?,
+            created_at: row.get(11)?,
+            updated_at: row.get(12)?,
         })
     }
 
@@ -780,10 +796,13 @@ impl Database {
             None
         };
 
+        // Extract job code from raw text if available
+        let job_code = raw_text.and_then(|text| extract_job_code(text));
+
         self.conn.execute(
-            "INSERT INTO jobs (employer_id, title, url, source, pay_min, pay_max, raw_text)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![employer_id, title, url, source, pay_min, pay_max, raw_text],
+            "INSERT INTO jobs (employer_id, title, url, source, pay_min, pay_max, job_code, raw_text)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![employer_id, title, url, source, pay_min, pay_max, job_code, raw_text],
         )?;
 
         let job_id = self.conn.last_insert_rowid();
@@ -1182,6 +1201,75 @@ fn extract_employer(content: &str) -> Option<String> {
         let company = after[..end].trim();
         if !company.is_empty() && company.len() < 50 {
             return Some(company.to_string());
+        }
+    }
+
+    None
+}
+
+fn extract_job_code(content: &str) -> Option<String> {
+    // Common job code patterns:
+    // - "Job ID: 12345"
+    // - "Job Code: ABC123"
+    // - "Requisition ID: REQ-2024-001"
+    // - "Req#: 123456"
+    // - "Job #: 987654"
+    // - "Job Number: 12345"
+    // - "JR12345" or "R12345" (common LinkedIn format)
+
+    let lower = content.to_lowercase();
+    let patterns = [
+        ("job id:", 7),
+        ("job code:", 10),
+        ("requisition id:", 15),
+        ("req id:", 7),
+        ("req#:", 5),
+        ("req #:", 6),
+        ("job #:", 6),
+        ("job number:", 11),
+        ("job no:", 7),
+        ("reference:", 10),
+        ("ref:", 4),
+    ];
+
+    // Try each pattern
+    for (pattern, offset) in patterns {
+        if let Some(idx) = lower.find(pattern) {
+            let after = &content[idx + offset..];
+            // Extract code (alphanumeric, dashes, underscores)
+            let code: String = after
+                .chars()
+                .skip_while(|c| c.is_whitespace())
+                .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '/')
+                .collect();
+
+            if !code.is_empty() && code.len() <= 50 {
+                return Some(code);
+            }
+        }
+    }
+
+    // Look for LinkedIn job ID pattern in URL (job/view/123456)
+    if let Some(idx) = content.find("/job/view/") {
+        let after = &content[idx + 10..];
+        let id: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if !id.is_empty() {
+            return Some(format!("linkedin-{}", id));
+        }
+    }
+
+    // Look for "JR" or "R" followed by numbers (common format)
+    if let Some(idx) = content.find("JR") {
+        let after = &content[idx + 2..];
+        let code: String = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '-')
+            .collect();
+        if !code.is_empty() && code.len() >= 4 && code.len() <= 20 {
+            return Some(format!("JR{}", code));
         }
     }
 

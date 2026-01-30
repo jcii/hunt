@@ -48,6 +48,7 @@ pub struct Job {
     pub status: String,         // "new", "reviewing", "applied", "rejected", "closed"
     pub pay_min: Option<i64>,
     pub pay_max: Option<i64>,
+    pub job_code: Option<String>, // Job code/number/requisition ID for deduplication
     pub raw_text: Option<String>,
     pub created_at: String,
     pub updated_at: String,
