@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use db::Database;
 use email::{EmailConfig, EmailIngester};
 use models::{BaseResume, Employer, Job};
+use scraper::{Html, Selector};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -119,6 +120,12 @@ enum Commands {
     Startup {
         #[command(subcommand)]
         command: StartupCommands,
+    },
+
+    /// Fetch job description from URL
+    Fetch {
+        /// Job ID to fetch
+        id: i64,
     },
 }
 
@@ -1330,6 +1337,29 @@ fn main() -> Result<()> {
                 }
             }
         }
+
+        Commands::Fetch { id } => {
+            db.ensure_initialized()?;
+
+            // Get job from database
+            let job = db.get_job(id)?
+                .ok_or_else(|| anyhow!("Job #{} not found", id))?;
+
+            if let Some(url) = &job.url {
+                println!("Fetching job description from: {}", url);
+
+                // Fetch and extract description
+                let description = fetch_job_description(url)?;
+
+                // Update job with description
+                db.update_job_description(id, &description)?;
+
+                println!("✓ Job description fetched and stored ({} chars)", description.len());
+            } else {
+                println!("Error: Job #{} has no URL", id);
+                return Err(anyhow!("Job has no URL to fetch from"));
+            }
+        }
     }
 
     Ok(())
@@ -1372,4 +1402,60 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         format!("{}...", &s[..max.saturating_sub(3)])
     }
+}
+
+fn fetch_job_description(url: &str) -> Result<String> {
+    // Fetch the HTML content
+    let response = reqwest::blocking::get(url)
+        .context("Failed to fetch URL")?;
+
+    let html_content = response.text()
+        .context("Failed to read response body")?;
+
+    // Parse HTML
+    let document = Html::parse_document(&html_content);
+
+    // Try to extract job description - common patterns
+    let selectors = [
+        // LinkedIn job descriptions
+        ".description__text",
+        ".show-more-less-html__markup",
+        // Indeed job descriptions
+        "#jobDescriptionText",
+        ".jobsearch-jobDescriptionText",
+        // Generic fallbacks
+        "[class*='description']",
+        "[class*='job-description']",
+        "[id*='description']",
+        "article",
+        "main",
+    ];
+
+    for selector_str in &selectors {
+        if let Ok(selector) = Selector::parse(selector_str) {
+            if let Some(element) = document.select(&selector).next() {
+                let text = element.text().collect::<Vec<_>>().join(" ");
+                let trimmed = text.trim();
+
+                // If we found substantial content, use it
+                if trimmed.len() > 100 {
+                    return Ok(trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    // Fallback: extract all text from body if no specific description found
+    if let Ok(body_selector) = Selector::parse("body") {
+        if let Some(body) = document.select(&body_selector).next() {
+            let text = body.text().collect::<Vec<_>>().join(" ");
+            let trimmed = text.trim();
+
+            if !trimmed.is_empty() {
+                return Ok(trimmed.to_string());
+            }
+        }
+    }
+
+    Err(anyhow!("Could not extract job description from page"))
 }

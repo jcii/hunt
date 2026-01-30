@@ -818,6 +818,23 @@ impl Database {
         Ok(job_id)
     }
 
+    pub fn update_job_description(&self, job_id: i64, description: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE jobs
+             SET raw_text = ?1, updated_at = datetime('now')
+             WHERE id = ?2",
+            params![description, job_id],
+        )?;
+
+        // Create a snapshot of the new description
+        self.conn.execute(
+            "INSERT INTO job_snapshots (job_id, raw_text) VALUES (?1, ?2)",
+            params![job_id, description],
+        )?;
+
+        Ok(())
+    }
+
     // --- Base Resume operations ---
 
     pub fn create_base_resume(
