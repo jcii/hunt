@@ -9,6 +9,16 @@ pub struct Employer {
     pub notes: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    // Startup research fields
+    pub crunchbase_url: Option<String>,
+    pub funding_stage: Option<String>,
+    pub total_funding: Option<i64>,
+    pub last_funding_date: Option<String>,
+    pub yc_batch: Option<String>,
+    pub yc_url: Option<String>,
+    pub hn_mentions_count: Option<i64>,
+    pub recent_news: Option<String>,
+    pub research_updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

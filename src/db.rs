@@ -43,7 +43,16 @@ impl Database {
                 status TEXT NOT NULL DEFAULT 'ok' CHECK (status IN ('ok', 'yuck', 'never')),
                 notes TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                crunchbase_url TEXT,
+                funding_stage TEXT,
+                total_funding INTEGER,
+                last_funding_date TEXT,
+                yc_batch TEXT,
+                yc_url TEXT,
+                hn_mentions_count INTEGER,
+                recent_news TEXT,
+                research_updated_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS jobs (
@@ -111,6 +120,36 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_glassdoor_date ON glassdoor_reviews(review_date);
             "#,
         )?;
+
+        // Run migrations for existing databases
+        self.migrate()?;
+
+        Ok(())
+    }
+
+    fn migrate(&self) -> Result<()> {
+        // Check if startup research columns exist
+        let columns: Vec<String> = self.conn
+            .prepare("PRAGMA table_info(employers)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if !columns.contains(&"crunchbase_url".to_string()) {
+            self.conn.execute_batch(
+                r#"
+                ALTER TABLE employers ADD COLUMN crunchbase_url TEXT;
+                ALTER TABLE employers ADD COLUMN funding_stage TEXT;
+                ALTER TABLE employers ADD COLUMN total_funding INTEGER;
+                ALTER TABLE employers ADD COLUMN last_funding_date TEXT;
+                ALTER TABLE employers ADD COLUMN yc_batch TEXT;
+                ALTER TABLE employers ADD COLUMN yc_url TEXT;
+                ALTER TABLE employers ADD COLUMN hn_mentions_count INTEGER;
+                ALTER TABLE employers ADD COLUMN recent_news TEXT;
+                ALTER TABLE employers ADD COLUMN research_updated_at TEXT;
+                "#,
+            )?;
+        }
+
         Ok(())
     }
 
@@ -155,7 +194,10 @@ impl Database {
 
     pub fn list_employers(&self, status: Option<&str>) -> Result<Vec<Employer>> {
         let mut sql = String::from(
-            "SELECT id, name, domain, status, notes, created_at, updated_at FROM employers",
+            "SELECT id, name, domain, status, notes, created_at, updated_at,
+             crunchbase_url, funding_stage, total_funding, last_funding_date,
+             yc_batch, yc_url, hn_mentions_count, recent_news, research_updated_at
+             FROM employers",
         );
         if status.is_some() {
             sql.push_str(" WHERE status = ?1");
@@ -175,7 +217,9 @@ impl Database {
 
     pub fn get_employer_by_name(&self, name: &str) -> Result<Option<Employer>> {
         let result = self.conn.query_row(
-            "SELECT id, name, domain, status, notes, created_at, updated_at
+            "SELECT id, name, domain, status, notes, created_at, updated_at,
+             crunchbase_url, funding_stage, total_funding, last_funding_date,
+             yc_batch, yc_url, hn_mentions_count, recent_news, research_updated_at
              FROM employers WHERE LOWER(name) = LOWER(?1)",
             [name],
             Self::row_to_employer,
@@ -197,6 +241,46 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_employer_research(
+        &self,
+        employer_id: i64,
+        crunchbase_url: Option<&str>,
+        funding_stage: Option<&str>,
+        total_funding: Option<i64>,
+        last_funding_date: Option<&str>,
+        yc_batch: Option<&str>,
+        yc_url: Option<&str>,
+        hn_mentions_count: Option<i64>,
+        recent_news: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE employers SET
+                crunchbase_url = ?1,
+                funding_stage = ?2,
+                total_funding = ?3,
+                last_funding_date = ?4,
+                yc_batch = ?5,
+                yc_url = ?6,
+                hn_mentions_count = ?7,
+                recent_news = ?8,
+                research_updated_at = datetime('now'),
+                updated_at = datetime('now')
+             WHERE id = ?9",
+            params![
+                crunchbase_url,
+                funding_stage,
+                total_funding,
+                last_funding_date,
+                yc_batch,
+                yc_url,
+                hn_mentions_count,
+                recent_news,
+                employer_id
+            ],
+        )?;
+        Ok(())
+    }
+
     fn row_to_employer(row: &rusqlite::Row) -> rusqlite::Result<Employer> {
         Ok(Employer {
             id: row.get(0)?,
@@ -206,6 +290,15 @@ impl Database {
             notes: row.get(4)?,
             created_at: row.get(5)?,
             updated_at: row.get(6)?,
+            crunchbase_url: row.get(7)?,
+            funding_stage: row.get(8)?,
+            total_funding: row.get(9)?,
+            last_funding_date: row.get(10)?,
+            yc_batch: row.get(11)?,
+            yc_url: row.get(12)?,
+            hn_mentions_count: row.get(13)?,
+            recent_news: row.get(14)?,
+            research_updated_at: row.get(15)?,
         })
     }
 

@@ -141,6 +141,12 @@ enum EmployerCommands {
         /// Employer name or ID
         name: String,
     },
+
+    /// Research startup info (funding, YC, HN mentions)
+    Research {
+        /// Employer name
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -304,6 +310,63 @@ fn fetch_glassdoor_reviews(db: &Database, employer: &Employer, dry_run: bool) ->
     }
 
     Ok(added)
+}
+
+#[derive(Debug, Default)]
+struct StartupResearchData {
+    crunchbase_url: Option<String>,
+    funding_stage: Option<String>,
+    total_funding: Option<i64>,
+    last_funding_date: Option<String>,
+    yc_batch: Option<String>,
+    yc_url: Option<String>,
+    hn_mentions_count: Option<i64>,
+    recent_news: Option<String>,
+}
+
+fn research_startup(name: &str) -> Result<StartupResearchData> {
+    let mut data = StartupResearchData::default();
+
+    // Research YC companies
+    if let Ok(yc_info) = search_yc_company(name) {
+        data.yc_batch = yc_info.batch;
+        data.yc_url = yc_info.url;
+    }
+
+    // Research HN mentions
+    if let Ok(hn_count) = search_hn_mentions(name) {
+        data.hn_mentions_count = Some(hn_count);
+    }
+
+    // Note: Crunchbase requires API access or scraping, which is more complex
+    // For now, we'll leave this as a placeholder for future implementation
+    // data.crunchbase_url = search_crunchbase(name)?;
+
+    Ok(data)
+}
+
+#[derive(Debug)]
+struct YCCompanyInfo {
+    batch: Option<String>,
+    url: Option<String>,
+}
+
+fn search_yc_company(name: &str) -> Result<YCCompanyInfo> {
+    // YC has a companies list at https://www.ycombinator.com/companies
+    // For now, this is a stub implementation that could be enhanced with actual API/scraping
+    // TODO: Implement actual YC company search
+    Ok(YCCompanyInfo {
+        batch: None,
+        url: None,
+    })
+}
+
+fn search_hn_mentions(name: &str) -> Result<i64> {
+    // Use HN Algolia API to search for mentions
+    // https://hn.algolia.com/api
+    // For now, this is a stub implementation
+    // TODO: Implement actual HN search via Algolia API
+    Ok(0)
 }
 
 fn cleanup_artifacts(db: &Database, dry_run: bool) -> Result<usize> {
@@ -496,6 +559,39 @@ fn main() -> Result<()> {
                             if let Some(notes) = &emp.notes {
                                 println!("Notes: {}", notes);
                             }
+
+                            // Show startup research data if available
+                            if emp.yc_batch.is_some() || emp.funding_stage.is_some() || emp.hn_mentions_count.is_some() {
+                                println!("\n--- Startup Research ---");
+                                if let Some(batch) = &emp.yc_batch {
+                                    println!("YC Batch: {}", batch);
+                                    if let Some(url) = &emp.yc_url {
+                                        println!("YC URL: {}", url);
+                                    }
+                                }
+                                if let Some(stage) = &emp.funding_stage {
+                                    println!("Funding Stage: {}", stage);
+                                }
+                                if let Some(funding) = emp.total_funding {
+                                    println!("Total Funding: ${}", funding);
+                                }
+                                if let Some(date) = &emp.last_funding_date {
+                                    println!("Last Funding: {}", date);
+                                }
+                                if let Some(cb_url) = &emp.crunchbase_url {
+                                    println!("Crunchbase: {}", cb_url);
+                                }
+                                if let Some(count) = emp.hn_mentions_count {
+                                    println!("HN Mentions: {}", count);
+                                }
+                                if let Some(news) = &emp.recent_news {
+                                    println!("Recent News: {}", news);
+                                }
+                                if let Some(updated) = &emp.research_updated_at {
+                                    println!("Research Updated: {}", updated);
+                                }
+                            }
+
                             let jobs = db.list_jobs(None, Some(&emp.name))?;
                             if !jobs.is_empty() {
                                 println!("\nJobs ({}):", jobs.len());
@@ -507,6 +603,46 @@ fn main() -> Result<()> {
                         None => {
                             println!("Employer '{}' not found.", name);
                         }
+                    }
+                }
+
+                EmployerCommands::Research { name } => {
+                    println!("Researching startup info for '{}'...", name);
+
+                    // Get or create employer
+                    let employer_id = db.get_or_create_employer(&name)?;
+
+                    // Perform research
+                    let research_data = research_startup(&name)?;
+
+                    // Update database
+                    db.update_employer_research(
+                        employer_id,
+                        research_data.crunchbase_url.as_deref(),
+                        research_data.funding_stage.as_deref(),
+                        research_data.total_funding,
+                        research_data.last_funding_date.as_deref(),
+                        research_data.yc_batch.as_deref(),
+                        research_data.yc_url.as_deref(),
+                        research_data.hn_mentions_count,
+                        research_data.recent_news.as_deref(),
+                    )?;
+
+                    println!("\n✓ Research complete");
+                    if let Some(batch) = &research_data.yc_batch {
+                        println!("  YC Batch: {}", batch);
+                    }
+                    if let Some(stage) = &research_data.funding_stage {
+                        println!("  Funding Stage: {}", stage);
+                    }
+                    if let Some(funding) = research_data.total_funding {
+                        println!("  Total Funding: ${}", funding);
+                    }
+                    if let Some(count) = research_data.hn_mentions_count {
+                        println!("  HN Mentions: {}", count);
+                    }
+                    if let Some(news) = &research_data.recent_news {
+                        println!("  Recent News: {}", news);
                     }
                 }
             }
