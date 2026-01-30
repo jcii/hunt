@@ -66,7 +66,13 @@ impl Database {
                 yc_url TEXT,
                 hn_mentions_count INTEGER,
                 recent_news TEXT,
-                research_updated_at TEXT
+                research_updated_at TEXT,
+                controversies TEXT,
+                labor_practices TEXT,
+                environmental_issues TEXT,
+                political_donations TEXT,
+                evil_summary TEXT,
+                public_research_updated_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS jobs (
@@ -164,6 +170,20 @@ impl Database {
             )?;
         }
 
+        // Check if public company research columns exist
+        if !columns.contains(&"controversies".to_string()) {
+            self.conn.execute_batch(
+                r#"
+                ALTER TABLE employers ADD COLUMN controversies TEXT;
+                ALTER TABLE employers ADD COLUMN labor_practices TEXT;
+                ALTER TABLE employers ADD COLUMN environmental_issues TEXT;
+                ALTER TABLE employers ADD COLUMN political_donations TEXT;
+                ALTER TABLE employers ADD COLUMN evil_summary TEXT;
+                ALTER TABLE employers ADD COLUMN public_research_updated_at TEXT;
+                "#,
+            )?;
+        }
+
         Ok(())
     }
 
@@ -210,7 +230,9 @@ impl Database {
         let mut sql = String::from(
             "SELECT id, name, domain, status, notes, created_at, updated_at,
              crunchbase_url, funding_stage, total_funding, last_funding_date,
-             yc_batch, yc_url, hn_mentions_count, recent_news, research_updated_at
+             yc_batch, yc_url, hn_mentions_count, recent_news, research_updated_at,
+             controversies, labor_practices, environmental_issues, political_donations,
+             evil_summary, public_research_updated_at
              FROM employers",
         );
         if status.is_some() {
@@ -233,7 +255,9 @@ impl Database {
         let result = self.conn.query_row(
             "SELECT id, name, domain, status, notes, created_at, updated_at,
              crunchbase_url, funding_stage, total_funding, last_funding_date,
-             yc_batch, yc_url, hn_mentions_count, recent_news, research_updated_at
+             yc_batch, yc_url, hn_mentions_count, recent_news, research_updated_at,
+             controversies, labor_practices, environmental_issues, political_donations,
+             evil_summary, public_research_updated_at
              FROM employers WHERE LOWER(name) = LOWER(?1)",
             [name],
             Self::row_to_employer,
@@ -295,6 +319,37 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_public_company_research(
+        &self,
+        employer_id: i64,
+        controversies: Option<&str>,
+        labor_practices: Option<&str>,
+        environmental_issues: Option<&str>,
+        political_donations: Option<&str>,
+        evil_summary: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE employers SET
+                controversies = ?1,
+                labor_practices = ?2,
+                environmental_issues = ?3,
+                political_donations = ?4,
+                evil_summary = ?5,
+                public_research_updated_at = datetime('now'),
+                updated_at = datetime('now')
+             WHERE id = ?6",
+            params![
+                controversies,
+                labor_practices,
+                environmental_issues,
+                political_donations,
+                evil_summary,
+                employer_id
+            ],
+        )?;
+        Ok(())
+    }
+
     fn row_to_employer(row: &rusqlite::Row) -> rusqlite::Result<Employer> {
         Ok(Employer {
             id: row.get(0)?,
@@ -313,6 +368,12 @@ impl Database {
             hn_mentions_count: row.get(13)?,
             recent_news: row.get(14)?,
             research_updated_at: row.get(15)?,
+            controversies: row.get(16)?,
+            labor_practices: row.get(17)?,
+            environmental_issues: row.get(18)?,
+            political_donations: row.get(19)?,
+            evil_summary: row.get(20)?,
+            public_research_updated_at: row.get(21)?,
         })
     }
 

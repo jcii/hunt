@@ -160,6 +160,12 @@ enum EmployerCommands {
         /// Employer name
         name: String,
     },
+
+    /// Research public company controversies and practices
+    Evil {
+        /// Employer name
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -346,6 +352,15 @@ struct StartupResearchData {
     recent_news: Option<String>,
 }
 
+#[derive(Debug, Default)]
+struct PublicCompanyResearchData {
+    controversies: Option<String>,
+    labor_practices: Option<String>,
+    environmental_issues: Option<String>,
+    political_donations: Option<String>,
+    evil_summary: Option<String>,
+}
+
 fn research_startup(name: &str) -> Result<StartupResearchData> {
     let mut data = StartupResearchData::default();
 
@@ -389,6 +404,29 @@ fn search_hn_mentions(name: &str) -> Result<i64> {
     // For now, this is a stub implementation
     // TODO: Implement actual HN search via Algolia API
     Ok(0)
+}
+
+fn research_public_company(name: &str) -> Result<PublicCompanyResearchData> {
+    let mut data = PublicCompanyResearchData::default();
+
+    // Note: This is a placeholder implementation
+    // In a real implementation, you would:
+    // 1. Search for news articles about controversies
+    // 2. Look up labor practice reports and ratings
+    // 3. Check environmental/ESG scores from sources like CDP, EPA
+    // 4. Research political donations via OpenSecrets or FEC data
+    // 5. Compile a summary with sources
+
+    // For now, return a placeholder that indicates research capability exists
+    data.evil_summary = Some(format!(
+        "Research framework ready for {}. Implementation pending: \
+         controversies tracking, labor practice ratings, environmental scores, \
+         political donation analysis. Sources to integrate: news APIs, OpenSecrets, \
+         EPA/CDP data, labor watch organizations.",
+        name
+    ));
+
+    Ok(data)
 }
 
 fn cleanup_artifacts(db: &Database, dry_run: bool) -> Result<usize> {
@@ -614,6 +652,30 @@ fn main() -> Result<()> {
                                 }
                             }
 
+                            // Show public company research data if available
+                            if emp.controversies.is_some() || emp.labor_practices.is_some()
+                                || emp.environmental_issues.is_some() || emp.political_donations.is_some() {
+                                println!("\n--- Public Company Research ---");
+                                if let Some(controversies) = &emp.controversies {
+                                    println!("Controversies: {}", controversies);
+                                }
+                                if let Some(labor) = &emp.labor_practices {
+                                    println!("Labor Practices: {}", labor);
+                                }
+                                if let Some(env) = &emp.environmental_issues {
+                                    println!("Environmental Issues: {}", env);
+                                }
+                                if let Some(donations) = &emp.political_donations {
+                                    println!("Political Donations: {}", donations);
+                                }
+                                if let Some(summary) = &emp.evil_summary {
+                                    println!("\nEvil Summary:\n{}", summary);
+                                }
+                                if let Some(updated) = &emp.public_research_updated_at {
+                                    println!("Research Updated: {}", updated);
+                                }
+                            }
+
                             let jobs = db.list_jobs(None, Some(&emp.name))?;
                             if !jobs.is_empty() {
                                 println!("\nJobs ({}):", jobs.len());
@@ -665,6 +727,43 @@ fn main() -> Result<()> {
                     }
                     if let Some(news) = &research_data.recent_news {
                         println!("  Recent News: {}", news);
+                    }
+                }
+
+                EmployerCommands::Evil { name } => {
+                    println!("Researching public company controversies for '{}'...", name);
+
+                    // Get or create employer
+                    let employer_id = db.get_or_create_employer(&name)?;
+
+                    // Perform research
+                    let research_data = research_public_company(&name)?;
+
+                    // Update database
+                    db.update_public_company_research(
+                        employer_id,
+                        research_data.controversies.as_deref(),
+                        research_data.labor_practices.as_deref(),
+                        research_data.environmental_issues.as_deref(),
+                        research_data.political_donations.as_deref(),
+                        research_data.evil_summary.as_deref(),
+                    )?;
+
+                    println!("\n✓ Research complete");
+                    if let Some(controversies) = &research_data.controversies {
+                        println!("  Controversies: {}", controversies);
+                    }
+                    if let Some(labor) = &research_data.labor_practices {
+                        println!("  Labor Practices: {}", labor);
+                    }
+                    if let Some(env) = &research_data.environmental_issues {
+                        println!("  Environmental: {}", env);
+                    }
+                    if let Some(donations) = &research_data.political_donations {
+                        println!("  Political Donations: {}", donations);
+                    }
+                    if let Some(summary) = &research_data.evil_summary {
+                        println!("\n  Summary:\n{}", summary);
                     }
                 }
             }

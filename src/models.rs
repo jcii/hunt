@@ -19,6 +19,13 @@ pub struct Employer {
     pub hn_mentions_count: Option<i64>,
     pub recent_news: Option<String>,
     pub research_updated_at: Option<String>,
+    // Public company research fields
+    pub controversies: Option<String>,
+    pub labor_practices: Option<String>,
+    pub environmental_issues: Option<String>,
+    pub political_donations: Option<String>,
+    pub evil_summary: Option<String>,
+    pub public_research_updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
