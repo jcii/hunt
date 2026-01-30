@@ -4,6 +4,20 @@ use std::path::PathBuf;
 
 use crate::models::{BaseResume, Employer, GlassdoorReview, Job, ResumeVariant};
 
+pub struct DestructionStats {
+    pub jobs: i64,
+    pub job_snapshots: i64,
+    pub employers: i64,
+    pub base_resumes: i64,
+    pub resume_variants: i64,
+}
+
+impl DestructionStats {
+    pub fn total(&self) -> i64 {
+        self.jobs + self.job_snapshots + self.employers + self.base_resumes + self.resume_variants
+    }
+}
+
 pub struct Database {
     conn: Connection,
     path: PathBuf,
@@ -847,6 +861,63 @@ impl Database {
 
         rows.collect::<Result<Vec<_>, _>>()
             .context("Failed to list resume variants")
+    }
+
+    // --- Destruction operations ---
+
+    pub fn get_destruction_stats(&self) -> Result<DestructionStats> {
+        let jobs: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM jobs",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let job_snapshots: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM job_snapshots",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let employers: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM employers",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let base_resumes: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM base_resumes",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let resume_variants: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM resume_variants",
+            [],
+            |row| row.get(0),
+        )?;
+
+        Ok(DestructionStats {
+            jobs,
+            job_snapshots,
+            employers,
+            base_resumes,
+            resume_variants,
+        })
+    }
+
+    pub fn destroy_all_data(&self) -> Result<()> {
+        // Delete all data from all tables
+        self.conn.execute("DELETE FROM resume_variants", [])?;
+        self.conn.execute("DELETE FROM base_resumes", [])?;
+        self.conn.execute("DELETE FROM job_snapshots", [])?;
+        self.conn.execute("DELETE FROM glassdoor_reviews", [])?;
+        self.conn.execute("DELETE FROM jobs", [])?;
+        self.conn.execute("DELETE FROM employers", [])?;
+
+        // Reset auto-increment counters
+        self.conn.execute("DELETE FROM sqlite_sequence", [])?;
+
+        Ok(())
     }
 
     // --- Glassdoor Review operations ---

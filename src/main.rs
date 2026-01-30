@@ -107,6 +107,19 @@ enum Commands {
         #[command(subcommand)]
         command: GlassdoorCommands,
     },
+
+    /// Destroy all data in the database
+    Destroy {
+        /// Actually execute the wipe (required for safety)
+        #[arg(long)]
+        confirm: bool,
+    },
+
+    /// Research startups
+    Startup {
+        #[command(subcommand)]
+        command: StartupCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -219,6 +232,15 @@ enum GlassdoorCommands {
 
     /// Show sentiment summary for an employer
     Summary {
+        /// Employer name
+        employer: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum StartupCommands {
+    /// Research startup information for an employer
+    Research {
         /// Employer name
         employer: String,
     },
@@ -962,6 +984,75 @@ fn main() -> Result<()> {
                     let recent_count = db.get_recent_review_count(emp.id, &seven_days_ago.format("%Y-%m-%d").to_string())?;
                     if recent_count > 0 {
                         println!("\n⚠ ALERT: {} new review(s) in the last 7 days", recent_count);
+                    }
+                }
+            }
+        }
+
+        Commands::Destroy { confirm } => {
+            db.ensure_initialized()?;
+
+            // Count what will be destroyed
+            let stats = db.get_destruction_stats()?;
+
+            println!("Database destruction preview:");
+            println!("  Jobs:            {}", stats.jobs);
+            println!("  Job snapshots:   {}", stats.job_snapshots);
+            println!("  Employers:       {}", stats.employers);
+            println!("  Base resumes:    {}", stats.base_resumes);
+            println!("  Resume variants: {}", stats.resume_variants);
+            println!("\nTotal records: {}", stats.total());
+
+            if !confirm {
+                println!("\n⚠️  This is a preview. To actually destroy all data, run:");
+                println!("  hunt destroy --confirm");
+            } else {
+                println!("\n⚠️  DESTROYING ALL DATA...");
+                db.destroy_all_data()?;
+                println!("✓ All data destroyed and auto-increment counters reset.");
+            }
+        }
+
+        Commands::Startup { command } => {
+            db.ensure_initialized()?;
+            match command {
+                StartupCommands::Research { employer } => {
+                    println!("Researching startup info for '{}'...", employer);
+
+                    // Get or create employer
+                    let employer_id = db.get_or_create_employer(&employer)?;
+
+                    // Perform research
+                    let research_data = research_startup(&employer)?;
+
+                    // Update database
+                    db.update_employer_research(
+                        employer_id,
+                        research_data.crunchbase_url.as_deref(),
+                        research_data.funding_stage.as_deref(),
+                        research_data.total_funding,
+                        research_data.last_funding_date.as_deref(),
+                        research_data.yc_batch.as_deref(),
+                        research_data.yc_url.as_deref(),
+                        research_data.hn_mentions_count,
+                        research_data.recent_news.as_deref(),
+                    )?;
+
+                    println!("\n✓ Research complete");
+                    if let Some(batch) = &research_data.yc_batch {
+                        println!("  YC Batch: {}", batch);
+                    }
+                    if let Some(stage) = &research_data.funding_stage {
+                        println!("  Funding Stage: {}", stage);
+                    }
+                    if let Some(funding) = research_data.total_funding {
+                        println!("  Total Funding: ${}", funding);
+                    }
+                    if let Some(count) = research_data.hn_mentions_count {
+                        println!("  HN Mentions: {}", count);
+                    }
+                    if let Some(news) = &research_data.recent_news {
+                        println!("  Recent News: {}", news);
                     }
                 }
             }
