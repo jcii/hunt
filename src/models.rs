@@ -55,3 +55,18 @@ pub struct ResumeVariant {
     pub tailoring_notes: Option<String>,
     pub created_at: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlassdoorReview {
+    pub id: i64,
+    pub employer_id: i64,
+    pub employer_name: Option<String>,
+    pub rating: f64,
+    pub title: Option<String>,
+    pub pros: Option<String>,
+    pub cons: Option<String>,
+    pub review_text: Option<String>,
+    pub sentiment: String, // "positive", "negative", "neutral"
+    pub review_date: Option<String>,
+    pub captured_at: String,
+}

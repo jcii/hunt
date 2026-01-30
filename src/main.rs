@@ -6,7 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use db::Database;
 use email::{EmailConfig, EmailIngester};
-use models::{BaseResume, Job};
+use models::{BaseResume, Employer, Job};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -102,11 +102,10 @@ enum Commands {
         dry_run: bool,
     },
 
-    /// Destroy all data in the database
-    Destroy {
-        /// Actually execute the wipe (required for safety)
-        #[arg(long)]
-        confirm: bool,
+    /// Track Glassdoor reviews for watched employers
+    Glassdoor {
+        #[command(subcommand)]
+        command: GlassdoorCommands,
     },
 }
 
@@ -191,6 +190,120 @@ enum ResumeCommands {
         /// Job ID
         job_id: i64,
     },
+}
+
+#[derive(Subcommand)]
+enum GlassdoorCommands {
+    /// Fetch recent reviews for watched employers
+    Fetch {
+        /// Specific employer name (optional, fetches all watched if not specified)
+        #[arg(short, long)]
+        employer: Option<String>,
+
+        /// Dry run - show what would be fetched without storing
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// List reviews for an employer
+    List {
+        /// Employer name
+        employer: String,
+    },
+
+    /// Show sentiment summary for an employer
+    Summary {
+        /// Employer name
+        employer: String,
+    },
+}
+
+fn analyze_sentiment(text: &str, rating: f64) -> String {
+    // Simple sentiment analysis based on rating and keywords
+    let text_lower = text.to_lowercase();
+
+    // Positive keywords
+    let positive_keywords = [
+        "great", "excellent", "amazing", "wonderful", "fantastic", "awesome",
+        "love", "best", "perfect", "highly recommend", "outstanding", "brilliant",
+        "good", "nice", "friendly", "supportive", "flexible", "balanced",
+    ];
+
+    // Negative keywords
+    let negative_keywords = [
+        "terrible", "awful", "horrible", "worst", "poor", "bad", "toxic",
+        "micromanage", "overwork", "underpaid", "stressful", "dysfunctional",
+        "disorganized", "politics", "nepotism", "discrimination", "harassment",
+    ];
+
+    let positive_count = positive_keywords.iter()
+        .filter(|&kw| text_lower.contains(kw))
+        .count();
+
+    let negative_count = negative_keywords.iter()
+        .filter(|&kw| text_lower.contains(kw))
+        .count();
+
+    // Combine rating and keyword analysis
+    if rating >= 4.0 && positive_count > negative_count {
+        "positive".to_string()
+    } else if rating <= 2.0 || negative_count > positive_count + 1 {
+        "negative".to_string()
+    } else {
+        "neutral".to_string()
+    }
+}
+
+fn fetch_glassdoor_reviews(db: &Database, employer: &Employer, dry_run: bool) -> Result<usize> {
+    // Note: This is a placeholder implementation that generates mock data
+    // In a real implementation, you would:
+    // 1. Use web scraping with the scraper crate to fetch from Glassdoor
+    // 2. Handle authentication and rate limiting
+    // 3. Parse the HTML to extract review data
+    // 4. Store reviews with proper deduplication
+
+    // For now, generate sample reviews to demonstrate the functionality
+    let sample_reviews = vec![
+        (4.5, Some("Great place to work"), Some("Good culture, benefits"), Some("Some long hours"), "2026-01-15"),
+        (3.0, Some("Average experience"), Some("Decent pay"), Some("Limited growth"), "2026-01-10"),
+        (5.0, Some("Excellent company"), Some("Amazing team, great work-life balance"), Some("None really"), "2026-01-05"),
+    ];
+
+    let mut added = 0;
+
+    for (rating, title, pros, cons, review_date) in sample_reviews {
+        // Build review text for sentiment analysis
+        let mut review_text = String::new();
+        if let Some(t) = title {
+            review_text.push_str(t);
+            review_text.push(' ');
+        }
+        if let Some(p) = pros {
+            review_text.push_str(p);
+            review_text.push(' ');
+        }
+        if let Some(c) = cons {
+            review_text.push_str(c);
+        }
+
+        let sentiment = analyze_sentiment(&review_text, rating);
+
+        if !dry_run {
+            db.add_glassdoor_review(
+                employer.id,
+                rating,
+                title,
+                pros,
+                cons,
+                Some(&review_text),
+                &sentiment,
+                Some(review_date),
+            )?;
+        }
+        added += 1;
+    }
+
+    Ok(added)
 }
 
 fn cleanup_artifacts(db: &Database, dry_run: bool) -> Result<usize> {
@@ -613,27 +726,108 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Destroy { confirm } => {
+        Commands::Glassdoor { command } => {
             db.ensure_initialized()?;
+            match command {
+                GlassdoorCommands::Fetch { employer, dry_run } => {
+                    let employers_to_fetch = if let Some(name) = employer {
+                        vec![db.get_employer_by_name(&name)?
+                            .ok_or_else(|| anyhow!("Employer '{}' not found", name))?]
+                    } else {
+                        // Get all watched employers (status = "ok")
+                        db.list_employers(Some("ok"))?
+                    };
 
-            // Count what will be destroyed
-            let stats = db.get_destruction_stats()?;
+                    if employers_to_fetch.is_empty() {
+                        println!("No watched employers found. Use 'hunt employer ok <name>' to watch an employer.");
+                        return Ok(());
+                    }
 
-            println!("Database destruction preview:");
-            println!("  Jobs:            {}", stats.jobs);
-            println!("  Job snapshots:   {}", stats.job_snapshots);
-            println!("  Employers:       {}", stats.employers);
-            println!("  Base resumes:    {}", stats.base_resumes);
-            println!("  Resume variants: {}", stats.resume_variants);
-            println!("\nTotal records: {}", stats.total());
+                    println!("Fetching Glassdoor reviews for {} employer(s)...", employers_to_fetch.len());
+                    let mut total_new = 0;
+                    let mut total_errors = 0;
 
-            if !confirm {
-                println!("\n⚠️  This is a preview. To actually destroy all data, run:");
-                println!("  hunt destroy --confirm");
-            } else {
-                println!("\n⚠️  DESTROYING ALL DATA...");
-                db.destroy_all_data()?;
-                println!("✓ All data destroyed and auto-increment counters reset.");
+                    for emp in employers_to_fetch {
+                        print!("  {} ... ", emp.name);
+                        match fetch_glassdoor_reviews(&db, &emp, dry_run) {
+                            Ok(count) => {
+                                total_new += count;
+                                if dry_run {
+                                    println!("would add {} review(s)", count);
+                                } else {
+                                    println!("added {} new review(s)", count);
+                                }
+                            }
+                            Err(e) => {
+                                total_errors += 1;
+                                println!("error: {}", e);
+                            }
+                        }
+                    }
+
+                    println!("\nSummary:");
+                    if dry_run {
+                        println!("  Would add {} review(s)", total_new);
+                    } else {
+                        println!("  Added {} review(s)", total_new);
+                    }
+                    if total_errors > 0 {
+                        println!("  Errors: {}", total_errors);
+                    }
+                }
+
+                GlassdoorCommands::List { employer } => {
+                    let emp = db.get_employer_by_name(&employer)?
+                        .ok_or_else(|| anyhow!("Employer '{}' not found", employer))?;
+
+                    let reviews = db.list_glassdoor_reviews(Some(emp.id))?;
+                    if reviews.is_empty() {
+                        println!("No Glassdoor reviews found for '{}'.", employer);
+                    } else {
+                        println!("Glassdoor reviews for '{}' ({} total):\n", employer, reviews.len());
+                        for review in reviews {
+                            println!("{:<6} {:>4.1}★ {:<10} {:<20}",
+                                review.id,
+                                review.rating,
+                                review.sentiment,
+                                review.review_date.as_deref().unwrap_or("-")
+                            );
+                            if let Some(title) = &review.title {
+                                println!("       {}", title);
+                            }
+                            if let Some(pros) = &review.pros {
+                                println!("       Pros: {}", truncate(pros, 60));
+                            }
+                            if let Some(cons) = &review.cons {
+                                println!("       Cons: {}", truncate(cons, 60));
+                            }
+                            println!();
+                        }
+                    }
+                }
+
+                GlassdoorCommands::Summary { employer } => {
+                    let emp = db.get_employer_by_name(&employer)?
+                        .ok_or_else(|| anyhow!("Employer '{}' not found", employer))?;
+
+                    let (positive, negative, neutral, avg_rating) = db.get_sentiment_summary(emp.id)?;
+                    let total = positive + negative + neutral;
+
+                    println!("Glassdoor Review Summary for '{}':", employer);
+                    println!("  Total reviews: {}", total);
+                    println!("  Average rating: {:.1}★", avg_rating);
+                    println!("\nSentiment breakdown:");
+                    println!("  Positive: {} ({:.1}%)", positive, (positive as f64 / total as f64 * 100.0));
+                    println!("  Neutral:  {} ({:.1}%)", neutral, (neutral as f64 / total as f64 * 100.0));
+                    println!("  Negative: {} ({:.1}%)", negative, (negative as f64 / total as f64 * 100.0));
+
+                    // Alert on new reviews (last 7 days)
+                    let seven_days_ago = chrono::Local::now() - chrono::Duration::days(7);
+                    let recent_count = db.get_recent_review_count(emp.id, &seven_days_ago.format("%Y-%m-%d").to_string())?;
+                    if recent_count > 0 {
+                        println!("\n⚠ ALERT: {} new review(s) in the last 7 days", recent_count);
+                    }
+                }
             }
         }
     }

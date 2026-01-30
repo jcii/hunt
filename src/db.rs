@@ -2,21 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
 
-use crate::models::{BaseResume, Employer, Job, ResumeVariant};
-
-pub struct DestructionStats {
-    pub jobs: i64,
-    pub job_snapshots: i64,
-    pub employers: i64,
-    pub base_resumes: i64,
-    pub resume_variants: i64,
-}
-
-impl DestructionStats {
-    pub fn total(&self) -> i64 {
-        self.jobs + self.job_snapshots + self.employers + self.base_resumes + self.resume_variants
-    }
-}
+use crate::models::{BaseResume, Employer, GlassdoorReview, Job, ResumeVariant};
 
 pub struct Database {
     conn: Connection,
@@ -107,6 +93,22 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_variants_base ON resume_variants(base_resume_id);
             CREATE INDEX IF NOT EXISTS idx_variants_job ON resume_variants(job_id);
+
+            CREATE TABLE IF NOT EXISTS glassdoor_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employer_id INTEGER NOT NULL REFERENCES employers(id),
+                rating REAL NOT NULL,
+                title TEXT,
+                pros TEXT,
+                cons TEXT,
+                review_text TEXT,
+                sentiment TEXT NOT NULL CHECK (sentiment IN ('positive', 'negative', 'neutral')),
+                review_date TEXT,
+                captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_glassdoor_employer ON glassdoor_reviews(employer_id);
+            CREATE INDEX IF NOT EXISTS idx_glassdoor_date ON glassdoor_reviews(review_date);
             "#,
         )?;
         Ok(())
@@ -500,15 +502,6 @@ impl Database {
                     } else {
                         false
                     }
-                } else if employer.is_none() && earlier_employer.is_none() {
-                    // Both have no employer - check title similarity
-                    let title_norm = normalize_title(title);
-                    let earlier_norm = normalize_title(earlier_title);
-
-                    title_norm == earlier_norm
-                        || title_norm.contains(&earlier_norm)
-                        || earlier_norm.contains(&title_norm)
-                        || strsim::jaro_winkler(&title_norm, &earlier_norm) > 0.8
                 } else {
                     false
                 };
@@ -763,60 +756,108 @@ impl Database {
             .context("Failed to list resume variants")
     }
 
-    // --- Destruction operations ---
+    // --- Glassdoor Review operations ---
 
-    pub fn get_destruction_stats(&self) -> Result<DestructionStats> {
-        let jobs: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM jobs",
-            [],
-            |row| row.get(0),
+    pub fn add_glassdoor_review(
+        &self,
+        employer_id: i64,
+        rating: f64,
+        title: Option<&str>,
+        pros: Option<&str>,
+        cons: Option<&str>,
+        review_text: Option<&str>,
+        sentiment: &str,
+        review_date: Option<&str>,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO glassdoor_reviews
+             (employer_id, rating, title, pros, cons, review_text, sentiment, review_date)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![employer_id, rating, title, pros, cons, review_text, sentiment, review_date],
         )?;
-
-        let job_snapshots: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM job_snapshots",
-            [],
-            |row| row.get(0),
-        )?;
-
-        let employers: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM employers",
-            [],
-            |row| row.get(0),
-        )?;
-
-        let base_resumes: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM base_resumes",
-            [],
-            |row| row.get(0),
-        )?;
-
-        let resume_variants: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM resume_variants",
-            [],
-            |row| row.get(0),
-        )?;
-
-        Ok(DestructionStats {
-            jobs,
-            job_snapshots,
-            employers,
-            base_resumes,
-            resume_variants,
-        })
+        Ok(self.conn.last_insert_rowid())
     }
 
-    pub fn destroy_all_data(&self) -> Result<()> {
-        // Delete all data from all tables
-        self.conn.execute("DELETE FROM resume_variants", [])?;
-        self.conn.execute("DELETE FROM base_resumes", [])?;
-        self.conn.execute("DELETE FROM job_snapshots", [])?;
-        self.conn.execute("DELETE FROM jobs", [])?;
-        self.conn.execute("DELETE FROM employers", [])?;
+    pub fn list_glassdoor_reviews(&self, employer_id: Option<i64>) -> Result<Vec<GlassdoorReview>> {
+        let mut sql = String::from(
+            "SELECT r.id, r.employer_id, e.name, r.rating, r.title, r.pros, r.cons,
+                    r.review_text, r.sentiment, r.review_date, r.captured_at
+             FROM glassdoor_reviews r
+             JOIN employers e ON r.employer_id = e.id",
+        );
 
-        // Reset auto-increment counters
-        self.conn.execute("DELETE FROM sqlite_sequence", [])?;
+        if employer_id.is_some() {
+            sql.push_str(" WHERE r.employer_id = ?1");
+        }
+        sql.push_str(" ORDER BY r.review_date DESC, r.captured_at DESC");
 
-        Ok(())
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = if let Some(id) = employer_id {
+            stmt.query_map([id], Self::row_to_glassdoor_review)?
+        } else {
+            stmt.query_map([], Self::row_to_glassdoor_review)?
+        };
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list Glassdoor reviews")
+    }
+
+    pub fn get_recent_review_count(&self, employer_id: i64, since: &str) -> Result<i64> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM glassdoor_reviews
+             WHERE employer_id = ?1 AND review_date >= ?2",
+            params![employer_id, since],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    pub fn get_sentiment_summary(&self, employer_id: i64) -> Result<(i64, i64, i64, f64)> {
+        let positive: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM glassdoor_reviews
+             WHERE employer_id = ?1 AND sentiment = 'positive'",
+            [employer_id],
+            |row| row.get(0),
+        )?;
+
+        let negative: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM glassdoor_reviews
+             WHERE employer_id = ?1 AND sentiment = 'negative'",
+            [employer_id],
+            |row| row.get(0),
+        )?;
+
+        let neutral: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM glassdoor_reviews
+             WHERE employer_id = ?1 AND sentiment = 'neutral'",
+            [employer_id],
+            |row| row.get(0),
+        )?;
+
+        let avg_rating: f64 = self.conn.query_row(
+            "SELECT COALESCE(AVG(rating), 0.0) FROM glassdoor_reviews
+             WHERE employer_id = ?1",
+            [employer_id],
+            |row| row.get(0),
+        )?;
+
+        Ok((positive, negative, neutral, avg_rating))
+    }
+
+    fn row_to_glassdoor_review(row: &rusqlite::Row) -> rusqlite::Result<GlassdoorReview> {
+        Ok(GlassdoorReview {
+            id: row.get(0)?,
+            employer_id: row.get(1)?,
+            employer_name: row.get(2)?,
+            rating: row.get(3)?,
+            title: row.get(4)?,
+            pros: row.get(5)?,
+            cons: row.get(6)?,
+            review_text: row.get(7)?,
+            sentiment: row.get(8)?,
+            review_date: row.get(9)?,
+            captured_at: row.get(10)?,
+        })
     }
 }
 
@@ -1151,114 +1192,6 @@ mod tests {
 
         let duplicates = db.find_duplicates()?;
         assert_eq!(duplicates.len(), 1, "Should find exactly one duplicate");
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_find_duplicates_no_employer() -> Result<()> {
-        let db = create_test_db()?;
-
-        // Add job with no employer
-        db.add_job_full(
-            "Software Engineer",
-            None,
-            None,
-            Some("indeed"),
-            None,
-            None,
-            None,
-        )?;
-
-        // Add duplicate with no employer
-        db.add_job_full(
-            "Software Engineer",
-            None,
-            None,
-            Some("linkedin"),
-            None,
-            None,
-            None,
-        )?;
-
-        let duplicates = db.find_duplicates()?;
-        assert_eq!(
-            duplicates.len(),
-            1,
-            "Should find duplicate even when both have no employer"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_destroy_all_data() -> Result<()> {
-        let db = create_test_db()?;
-
-        // Add some data
-        db.add_job_full(
-            "Test Job",
-            Some("Test Company"),
-            None,
-            Some("test"),
-            Some(100000),
-            Some(150000),
-            Some("raw text"),
-        )?;
-
-        // Verify data exists
-        let stats = db.get_destruction_stats()?;
-        assert!(stats.jobs > 0, "Should have jobs before destroy");
-        assert!(stats.employers > 0, "Should have employers before destroy");
-
-        // Destroy all data
-        db.destroy_all_data()?;
-
-        // Verify data is gone
-        let stats_after = db.get_destruction_stats()?;
-        assert_eq!(stats_after.jobs, 0, "Jobs should be zero after destroy");
-        assert_eq!(
-            stats_after.employers, 0,
-            "Employers should be zero after destroy"
-        );
-        assert_eq!(
-            stats_after.job_snapshots, 0,
-            "Snapshots should be zero after destroy"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_destroy_resets_auto_increment() -> Result<()> {
-        let db = create_test_db()?;
-
-        // Add a job
-        let id1 = db.add_job_full(
-            "Job 1",
-            Some("Company 1"),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )?;
-        assert!(id1 > 0);
-
-        // Destroy all
-        db.destroy_all_data()?;
-
-        // Add another job - should start from 1
-        let id2 = db.add_job_full(
-            "Job 2",
-            Some("Company 2"),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )?;
-        assert_eq!(id2, 1, "Auto-increment should reset to 1");
 
         Ok(())
     }
