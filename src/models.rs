@@ -26,6 +26,15 @@ pub struct Employer {
     pub political_donations: Option<String>,
     pub evil_summary: Option<String>,
     pub public_research_updated_at: Option<String>,
+    // Private company ownership fields
+    pub parent_company: Option<String>,
+    pub pe_owner: Option<String>,
+    pub pe_firm_url: Option<String>,
+    pub vc_investors: Option<String>,
+    pub key_investors: Option<String>,
+    pub ownership_concerns: Option<String>,
+    pub ownership_type: Option<String>,
+    pub ownership_research_updated: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

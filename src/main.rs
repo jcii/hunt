@@ -166,6 +166,12 @@ enum EmployerCommands {
         /// Employer name
         name: String,
     },
+
+    /// Research private company ownership (parent, PE/VC, investors)
+    Ownership {
+        /// Employer name
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -429,6 +435,103 @@ fn research_public_company(name: &str) -> Result<PublicCompanyResearchData> {
     Ok(data)
 }
 
+#[derive(Debug, Default)]
+struct PrivateOwnershipData {
+    parent_company: Option<String>,
+    pe_owner: Option<String>,
+    pe_firm_url: Option<String>,
+    vc_investors: Option<String>,
+    key_investors: Option<String>,
+    ownership_concerns: Option<String>,
+    ownership_type: Option<String>,
+}
+
+fn research_private_ownership(_name: &str) -> Result<PrivateOwnershipData> {
+    let mut data = PrivateOwnershipData::default();
+
+    // Research parent company
+    if let Ok(parent_info) = search_parent_company(_name) {
+        data.parent_company = parent_info.parent_name;
+        data.ownership_type = Some(parent_info.relationship_type);
+    }
+
+    // Research PE/VC ownership
+    if let Ok(pe_info) = search_pe_ownership(_name) {
+        data.pe_owner = pe_info.firm_name;
+        data.pe_firm_url = pe_info.firm_url;
+    }
+
+    // Research investor information
+    if let Ok(investors) = search_investor_info(_name) {
+        if !investors.is_empty() {
+            data.vc_investors = Some(investors.join(", "));
+        }
+    }
+
+    // Check for ownership concerns
+    if let Ok(concerns) = search_ownership_concerns(_name) {
+        if !concerns.is_empty() {
+            data.ownership_concerns = Some(concerns.join("; "));
+        }
+    }
+
+    Ok(data)
+}
+
+#[derive(Debug)]
+struct ParentCompanyInfo {
+    parent_name: Option<String>,
+    relationship_type: String,
+}
+
+fn search_parent_company(_name: &str) -> Result<ParentCompanyInfo> {
+    // TODO: Implement parent company research via:
+    // - Crunchbase API
+    // - LinkedIn company pages
+    // - SEC EDGAR filings for public companies
+    // - PitchBook data
+    Ok(ParentCompanyInfo {
+        parent_name: None,
+        relationship_type: "independent".to_string(),
+    })
+}
+
+#[derive(Debug)]
+struct PEOwnershipInfo {
+    firm_name: Option<String>,
+    firm_url: Option<String>,
+}
+
+fn search_pe_ownership(_name: &str) -> Result<PEOwnershipInfo> {
+    // TODO: Implement PE/VC ownership research via:
+    // - Crunchbase API for funding rounds
+    // - PitchBook for PE ownership
+    // - Company press releases
+    // - LinkedIn company pages
+    Ok(PEOwnershipInfo {
+        firm_name: None,
+        firm_url: None,
+    })
+}
+
+fn search_investor_info(_name: &str) -> Result<Vec<String>> {
+    // TODO: Implement investor research via:
+    // - Crunchbase API for investor lists
+    // - PitchBook data
+    // - Company announcements
+    // - SEC filings for public investors
+    Ok(vec![])
+}
+
+fn search_ownership_concerns(_name: &str) -> Result<Vec<String>> {
+    // TODO: Implement concern detection via:
+    // - News articles about controversial owners
+    // - ESG databases
+    // - Regulatory filings
+    // - Public controversy tracking
+    Ok(vec![])
+}
+
 fn cleanup_artifacts(db: &Database, dry_run: bool) -> Result<usize> {
     // Patterns that indicate navigation artifacts
     let artifact_patterns = [
@@ -676,6 +779,35 @@ fn main() -> Result<()> {
                                 }
                             }
 
+                            // Show private ownership research data if available
+                            if emp.parent_company.is_some() || emp.pe_owner.is_some() || emp.vc_investors.is_some() {
+                                println!("\n--- Ownership Research ---");
+                                if let Some(parent) = &emp.parent_company {
+                                    println!("Parent Company: {}", parent);
+                                }
+                                if let Some(ownership_type) = &emp.ownership_type {
+                                    println!("Ownership Type: {}", ownership_type);
+                                }
+                                if let Some(pe) = &emp.pe_owner {
+                                    println!("PE Owner: {}", pe);
+                                    if let Some(url) = &emp.pe_firm_url {
+                                        println!("PE Firm URL: {}", url);
+                                    }
+                                }
+                                if let Some(vc) = &emp.vc_investors {
+                                    println!("VC Investors: {}", vc);
+                                }
+                                if let Some(investors) = &emp.key_investors {
+                                    println!("Key Investors: {}", investors);
+                                }
+                                if let Some(concerns) = &emp.ownership_concerns {
+                                    println!("⚠ Concerns: {}", concerns);
+                                }
+                                if let Some(updated) = &emp.ownership_research_updated {
+                                    println!("Ownership Research Updated: {}", updated);
+                                }
+                            }
+
                             let jobs = db.list_jobs(None, Some(&emp.name))?;
                             if !jobs.is_empty() {
                                 println!("\nJobs ({}):", jobs.len());
@@ -764,6 +896,48 @@ fn main() -> Result<()> {
                     }
                     if let Some(summary) = &research_data.evil_summary {
                         println!("\n  Summary:\n{}", summary);
+                    }
+                }
+
+                EmployerCommands::Ownership { name } => {
+                    println!("Researching ownership info for '{}'...", name);
+
+                    // Get or create employer
+                    let employer_id = db.get_or_create_employer(&name)?;
+
+                    // Perform ownership research
+                    let ownership_data = research_private_ownership(&name)?;
+
+                    // Update database
+                    db.update_employer_ownership(
+                        employer_id,
+                        ownership_data.parent_company.as_deref(),
+                        ownership_data.pe_owner.as_deref(),
+                        ownership_data.pe_firm_url.as_deref(),
+                        ownership_data.vc_investors.as_deref(),
+                        ownership_data.key_investors.as_deref(),
+                        ownership_data.ownership_concerns.as_deref(),
+                        ownership_data.ownership_type.as_deref(),
+                    )?;
+
+                    println!("\n✓ Ownership research complete");
+                    if let Some(parent) = &ownership_data.parent_company {
+                        println!("  Parent Company: {}", parent);
+                    }
+                    if let Some(ownership_type) = &ownership_data.ownership_type {
+                        println!("  Ownership Type: {}", ownership_type);
+                    }
+                    if let Some(pe) = &ownership_data.pe_owner {
+                        println!("  PE Owner: {}", pe);
+                    }
+                    if let Some(vc) = &ownership_data.vc_investors {
+                        println!("  VC Investors: {}", vc);
+                    }
+                    if let Some(investors) = &ownership_data.key_investors {
+                        println!("  Key Investors: {}", investors);
+                    }
+                    if let Some(concerns) = &ownership_data.ownership_concerns {
+                        println!("  ⚠ Concerns: {}", concerns);
                     }
                 }
             }

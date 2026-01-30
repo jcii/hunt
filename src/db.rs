@@ -72,7 +72,15 @@ impl Database {
                 environmental_issues TEXT,
                 political_donations TEXT,
                 evil_summary TEXT,
-                public_research_updated_at TEXT
+                public_research_updated_at TEXT,
+                parent_company TEXT,
+                pe_owner TEXT,
+                pe_firm_url TEXT,
+                vc_investors TEXT,
+                key_investors TEXT,
+                ownership_concerns TEXT,
+                ownership_type TEXT,
+                ownership_research_updated TEXT
             );
 
             CREATE TABLE IF NOT EXISTS jobs (
@@ -184,6 +192,22 @@ impl Database {
             )?;
         }
 
+        // Check if private company ownership columns exist
+        if !columns.contains(&"parent_company".to_string()) {
+            self.conn.execute_batch(
+                r#"
+                ALTER TABLE employers ADD COLUMN parent_company TEXT;
+                ALTER TABLE employers ADD COLUMN pe_owner TEXT;
+                ALTER TABLE employers ADD COLUMN pe_firm_url TEXT;
+                ALTER TABLE employers ADD COLUMN vc_investors TEXT;
+                ALTER TABLE employers ADD COLUMN key_investors TEXT;
+                ALTER TABLE employers ADD COLUMN ownership_concerns TEXT;
+                ALTER TABLE employers ADD COLUMN ownership_type TEXT;
+                ALTER TABLE employers ADD COLUMN ownership_research_updated TEXT;
+                "#,
+            )?;
+        }
+
         Ok(())
     }
 
@@ -232,7 +256,9 @@ impl Database {
              crunchbase_url, funding_stage, total_funding, last_funding_date,
              yc_batch, yc_url, hn_mentions_count, recent_news, research_updated_at,
              controversies, labor_practices, environmental_issues, political_donations,
-             evil_summary, public_research_updated_at
+             evil_summary, public_research_updated_at,
+             parent_company, pe_owner, pe_firm_url, vc_investors, key_investors,
+             ownership_concerns, ownership_type, ownership_research_updated
              FROM employers",
         );
         if status.is_some() {
@@ -257,7 +283,9 @@ impl Database {
              crunchbase_url, funding_stage, total_funding, last_funding_date,
              yc_batch, yc_url, hn_mentions_count, recent_news, research_updated_at,
              controversies, labor_practices, environmental_issues, political_donations,
-             evil_summary, public_research_updated_at
+             evil_summary, public_research_updated_at,
+             parent_company, pe_owner, pe_firm_url, vc_investors, key_investors,
+             ownership_concerns, ownership_type, ownership_research_updated
              FROM employers WHERE LOWER(name) = LOWER(?1)",
             [name],
             Self::row_to_employer,
@@ -350,6 +378,43 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_employer_ownership(
+        &self,
+        employer_id: i64,
+        parent_company: Option<&str>,
+        pe_owner: Option<&str>,
+        pe_firm_url: Option<&str>,
+        vc_investors: Option<&str>,
+        key_investors: Option<&str>,
+        ownership_concerns: Option<&str>,
+        ownership_type: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE employers SET
+                parent_company = ?1,
+                pe_owner = ?2,
+                pe_firm_url = ?3,
+                vc_investors = ?4,
+                key_investors = ?5,
+                ownership_concerns = ?6,
+                ownership_type = ?7,
+                ownership_research_updated = datetime('now'),
+                updated_at = datetime('now')
+             WHERE id = ?8",
+            params![
+                parent_company,
+                pe_owner,
+                pe_firm_url,
+                vc_investors,
+                key_investors,
+                ownership_concerns,
+                ownership_type,
+                employer_id
+            ],
+        )?;
+        Ok(())
+    }
+
     fn row_to_employer(row: &rusqlite::Row) -> rusqlite::Result<Employer> {
         Ok(Employer {
             id: row.get(0)?,
@@ -374,6 +439,14 @@ impl Database {
             political_donations: row.get(19)?,
             evil_summary: row.get(20)?,
             public_research_updated_at: row.get(21)?,
+            parent_company: row.get(22)?,
+            pe_owner: row.get(23)?,
+            pe_firm_url: row.get(24)?,
+            vc_investors: row.get(25)?,
+            key_investors: row.get(26)?,
+            ownership_concerns: row.get(27)?,
+            ownership_type: row.get(28)?,
+            ownership_research_updated: row.get(29)?,
         })
     }
 
