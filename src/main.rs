@@ -1,3 +1,4 @@
+mod ai;
 mod db;
 mod email;
 mod models;
@@ -126,6 +127,18 @@ enum Commands {
     Fetch {
         /// Job ID to fetch
         id: i64,
+    },
+
+    /// AI-powered job analysis
+    Analyze {
+        /// Job ID to analyze
+        job_id: i64,
+    },
+
+    /// Extract keywords from a job posting
+    Keywords {
+        /// Job ID to extract keywords from
+        job_id: i64,
     },
 }
 
@@ -1360,6 +1373,45 @@ fn main() -> Result<()> {
                 return Err(anyhow!("Job has no URL to fetch from"));
             }
         }
+
+        Commands::Analyze { job_id } => {
+            db.ensure_initialized()?;
+            let job = db.get_job(job_id)?
+                .ok_or_else(|| anyhow!("Job #{} not found", job_id))?;
+
+            let job_text = job.raw_text
+                .as_ref()
+                .ok_or_else(|| anyhow!("Job #{} has no raw text to analyze", job_id))?;
+
+            println!("Analyzing job posting #{}: {}...\n", job_id, job.title);
+
+            let ai_client = ai::AIClient::new()?;
+            let analysis = ai_client.analyze_job(job_text)?;
+
+            println!("=== AI Analysis ===\n");
+            println!("{}", analysis);
+        }
+
+        Commands::Keywords { job_id } => {
+            db.ensure_initialized()?;
+            let job = db.get_job(job_id)?
+                .ok_or_else(|| anyhow!("Job #{} not found", job_id))?;
+
+            let job_text = job.raw_text
+                .as_ref()
+                .ok_or_else(|| anyhow!("Job #{} has no raw text to extract keywords from", job_id))?;
+
+            println!("Extracting keywords from job #{}: {}...\n", job_id, job.title);
+
+            let ai_client = ai::AIClient::new()?;
+            let keywords = ai_client.extract_keywords(job_text)?;
+
+            println!("=== Extracted Keywords ===\n");
+            for (i, keyword) in keywords.iter().enumerate() {
+                println!("{}. {}", i + 1, keyword);
+            }
+            println!("\nTotal: {} keywords", keywords.len());
+        }
     }
 
     Ok(())
@@ -1368,6 +1420,7 @@ fn main() -> Result<()> {
 fn tailor_resume_for_job(base_resume: &BaseResume, job: &Job) -> Result<String> {
     let mut tailored = String::new();
 
+    // Header section
     tailored.push_str(&format!("# Resume - Tailored for: {}\n\n", job.title));
 
     if let Some(employer) = &job.employer_name {
@@ -1387,6 +1440,31 @@ fn tailor_resume_for_job(base_resume: &BaseResume, job: &Job) -> Result<String> 
     }
 
     tailored.push_str("---\n\n");
+
+    // Try to get AI suggestions if job has raw text and API key is available
+    if let Some(job_text) = &job.raw_text {
+        match ai::AIClient::new() {
+            Ok(ai_client) => {
+                println!("Generating AI-powered tailoring suggestions...");
+                match ai_client.tailor_resume(&base_resume.content, job_text, &job.title) {
+                    Ok(suggestions) => {
+                        tailored.push_str("## AI Tailoring Suggestions\n\n");
+                        tailored.push_str(&suggestions);
+                        tailored.push_str("\n\n---\n\n");
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to generate AI suggestions: {}", e);
+                    }
+                }
+            }
+            Err(_) => {
+                // API key not available, skip AI suggestions
+            }
+        }
+    }
+
+    // Original resume content
+    tailored.push_str("## Base Resume\n\n");
     tailored.push_str(&base_resume.content);
 
     tailored.push_str("\n\n---\n");
