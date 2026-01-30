@@ -487,6 +487,7 @@ dependencies = [
  "scraper",
  "serde",
  "serde_json",
+ "strsim",
 ]
 
 [[package]]

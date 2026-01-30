@@ -4,6 +4,20 @@ use std::path::PathBuf;
 
 use crate::models::{BaseResume, Employer, Job, ResumeVariant};
 
+pub struct DestructionStats {
+    pub jobs: i64,
+    pub job_snapshots: i64,
+    pub employers: i64,
+    pub base_resumes: i64,
+    pub resume_variants: i64,
+}
+
+impl DestructionStats {
+    pub fn total(&self) -> i64 {
+        self.jobs + self.job_snapshots + self.employers + self.base_resumes + self.resume_variants
+    }
+}
+
 pub struct Database {
     conn: Connection,
     path: PathBuf,
@@ -486,6 +500,15 @@ impl Database {
                     } else {
                         false
                     }
+                } else if employer.is_none() && earlier_employer.is_none() {
+                    // Both have no employer - check title similarity
+                    let title_norm = normalize_title(title);
+                    let earlier_norm = normalize_title(earlier_title);
+
+                    title_norm == earlier_norm
+                        || title_norm.contains(&earlier_norm)
+                        || earlier_norm.contains(&title_norm)
+                        || strsim::jaro_winkler(&title_norm, &earlier_norm) > 0.8
                 } else {
                     false
                 };
@@ -738,6 +761,62 @@ impl Database {
 
         rows.collect::<Result<Vec<_>, _>>()
             .context("Failed to list resume variants")
+    }
+
+    // --- Destruction operations ---
+
+    pub fn get_destruction_stats(&self) -> Result<DestructionStats> {
+        let jobs: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM jobs",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let job_snapshots: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM job_snapshots",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let employers: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM employers",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let base_resumes: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM base_resumes",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let resume_variants: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM resume_variants",
+            [],
+            |row| row.get(0),
+        )?;
+
+        Ok(DestructionStats {
+            jobs,
+            job_snapshots,
+            employers,
+            base_resumes,
+            resume_variants,
+        })
+    }
+
+    pub fn destroy_all_data(&self) -> Result<()> {
+        // Delete all data from all tables
+        self.conn.execute("DELETE FROM resume_variants", [])?;
+        self.conn.execute("DELETE FROM base_resumes", [])?;
+        self.conn.execute("DELETE FROM job_snapshots", [])?;
+        self.conn.execute("DELETE FROM jobs", [])?;
+        self.conn.execute("DELETE FROM employers", [])?;
+
+        // Reset auto-increment counters
+        self.conn.execute("DELETE FROM sqlite_sequence", [])?;
+
+        Ok(())
     }
 }
 
@@ -1072,6 +1151,114 @@ mod tests {
 
         let duplicates = db.find_duplicates()?;
         assert_eq!(duplicates.len(), 1, "Should find exactly one duplicate");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_duplicates_no_employer() -> Result<()> {
+        let db = create_test_db()?;
+
+        // Add job with no employer
+        db.add_job_full(
+            "Software Engineer",
+            None,
+            None,
+            Some("indeed"),
+            None,
+            None,
+            None,
+        )?;
+
+        // Add duplicate with no employer
+        db.add_job_full(
+            "Software Engineer",
+            None,
+            None,
+            Some("linkedin"),
+            None,
+            None,
+            None,
+        )?;
+
+        let duplicates = db.find_duplicates()?;
+        assert_eq!(
+            duplicates.len(),
+            1,
+            "Should find duplicate even when both have no employer"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_destroy_all_data() -> Result<()> {
+        let db = create_test_db()?;
+
+        // Add some data
+        db.add_job_full(
+            "Test Job",
+            Some("Test Company"),
+            None,
+            Some("test"),
+            Some(100000),
+            Some(150000),
+            Some("raw text"),
+        )?;
+
+        // Verify data exists
+        let stats = db.get_destruction_stats()?;
+        assert!(stats.jobs > 0, "Should have jobs before destroy");
+        assert!(stats.employers > 0, "Should have employers before destroy");
+
+        // Destroy all data
+        db.destroy_all_data()?;
+
+        // Verify data is gone
+        let stats_after = db.get_destruction_stats()?;
+        assert_eq!(stats_after.jobs, 0, "Jobs should be zero after destroy");
+        assert_eq!(
+            stats_after.employers, 0,
+            "Employers should be zero after destroy"
+        );
+        assert_eq!(
+            stats_after.job_snapshots, 0,
+            "Snapshots should be zero after destroy"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_destroy_resets_auto_increment() -> Result<()> {
+        let db = create_test_db()?;
+
+        // Add a job
+        let id1 = db.add_job_full(
+            "Job 1",
+            Some("Company 1"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )?;
+        assert!(id1 > 0);
+
+        // Destroy all
+        db.destroy_all_data()?;
+
+        // Add another job - should start from 1
+        let id2 = db.add_job_full(
+            "Job 2",
+            Some("Company 2"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )?;
+        assert_eq!(id2, 1, "Auto-increment should reset to 1");
 
         Ok(())
     }

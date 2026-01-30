@@ -101,6 +101,13 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Destroy all data in the database
+    Destroy {
+        /// Actually execute the wipe (required for safety)
+        #[arg(long)]
+        confirm: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -603,6 +610,30 @@ fn main() -> Result<()> {
                 println!("\nTotal that would be removed: {}", total_removed);
             } else {
                 println!("\nTotal removed: {}", total_removed);
+            }
+        }
+
+        Commands::Destroy { confirm } => {
+            db.ensure_initialized()?;
+
+            // Count what will be destroyed
+            let stats = db.get_destruction_stats()?;
+
+            println!("Database destruction preview:");
+            println!("  Jobs:            {}", stats.jobs);
+            println!("  Job snapshots:   {}", stats.job_snapshots);
+            println!("  Employers:       {}", stats.employers);
+            println!("  Base resumes:    {}", stats.base_resumes);
+            println!("  Resume variants: {}", stats.resume_variants);
+            println!("\nTotal records: {}", stats.total());
+
+            if !confirm {
+                println!("\n⚠️  This is a preview. To actually destroy all data, run:");
+                println!("  hunt destroy --confirm");
+            } else {
+                println!("\n⚠️  DESTROYING ALL DATA...");
+                db.destroy_all_data()?;
+                println!("✓ All data destroyed and auto-increment counters reset.");
             }
         }
     }
