@@ -20,6 +20,7 @@ struct AnthropicRequest {
 
 #[derive(Debug, Deserialize)]
 struct ContentBlock {
+    #[allow(dead_code)]
     #[serde(rename = "type")]
     content_type: String,
     text: String,

@@ -621,6 +621,7 @@ impl Database {
 
     // --- Email ingestion support ---
 
+    #[allow(dead_code)]
     pub fn job_exists_by_url(&self, url: &str) -> Result<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM jobs WHERE url = ?1",
@@ -630,6 +631,7 @@ impl Database {
         Ok(count > 0)
     }
 
+    #[allow(dead_code)]
     pub fn job_exists_by_title_employer(&self, title: &str, employer: &str) -> Result<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM jobs j
@@ -718,7 +720,7 @@ impl Database {
              ORDER BY j.created_at ASC",
         )?;
 
-        let mut jobs: Vec<(i64, String, Option<String>, Option<String>, String)> = stmt
+        let jobs: Vec<(i64, String, Option<String>, Option<String>, String)> = stmt
             .query_map([], |row| {
                 Ok((
                     row.get(0)?,
@@ -923,6 +925,7 @@ impl Database {
         }
     }
 
+    #[allow(dead_code)]
     pub fn update_base_resume(
         &self,
         id: i64,
@@ -988,6 +991,7 @@ impl Database {
         Ok(self.conn.last_insert_rowid())
     }
 
+    #[allow(dead_code)]
     pub fn get_resume_variant(&self, job_id: i64, base_resume_id: i64) -> Result<Option<ResumeVariant>> {
         let result = self.conn.query_row(
             "SELECT id, base_resume_id, job_id, content, tailoring_notes, created_at
@@ -1295,7 +1299,7 @@ fn extract_job_code(content: &str) -> Option<String> {
 
 pub fn extract_pay_range(content: &str) -> (Option<i64>, Option<i64>) {
     // Look for salary patterns like "$150,000 - $200,000" or "$150k-200k"
-    let re_patterns = [
+    let _re_patterns = [
         r"\$(\d{2,3}),?(\d{3})\s*[-–to]+\s*\$(\d{2,3}),?(\d{3})",  // $150,000 - $200,000
         r"\$(\d{2,3})k\s*[-–to]+\s*\$?(\d{2,3})k",                  // $150k - $200k
     ];

@@ -200,6 +200,7 @@ pub struct ParsedJob {
     pub title: String,
     pub employer: Option<String>,
     pub url: Option<String>,
+    #[allow(dead_code)]
     pub location: Option<String>,
     pub pay_min: Option<i64>,
     pub pay_max: Option<i64>,
@@ -243,7 +244,7 @@ fn is_navigation_artifact(text: &str) -> bool {
     false
 }
 
-fn parse_linkedin_email(subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
+fn parse_linkedin_email(_subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
     let mut jobs = Vec::new();
     let document = Html::parse_document(body);
 
@@ -252,7 +253,7 @@ fn parse_linkedin_email(subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
 
     // Selector for job titles (usually in <a> tags with job URLs)
     let job_link_selector = Selector::parse("a[href*='linkedin.com/comm/jobs']").ok();
-    let job_card_selector = Selector::parse("table[role='presentation']").ok();
+    let _job_card_selector = Selector::parse("table[role='presentation']").ok();
 
     // Try to extract from links first
     if let Some(ref selector) = job_link_selector {
@@ -307,7 +308,7 @@ fn parse_linkedin_email(subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
     Ok(jobs)
 }
 
-fn parse_indeed_email(subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
+fn parse_indeed_email(_subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
     let mut jobs = Vec::new();
     let document = Html::parse_document(body);
 
@@ -356,7 +357,7 @@ fn parse_indeed_email(subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
     Ok(jobs)
 }
 
-fn parse_generic_job_email(subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
+fn parse_generic_job_email(_subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
     let document = Html::parse_document(body);
     let text = document.root_element().text().collect::<Vec<_>>().join(" ");
     extract_jobs_from_text(&text, "email")

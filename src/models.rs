@@ -55,6 +55,7 @@ pub struct Job {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct JobSnapshot {
     pub id: i64,
     pub job_id: i64,

@@ -414,7 +414,7 @@ struct YCCompanyInfo {
     url: Option<String>,
 }
 
-fn search_yc_company(name: &str) -> Result<YCCompanyInfo> {
+fn search_yc_company(_name: &str) -> Result<YCCompanyInfo> {
     // YC has a companies list at https://www.ycombinator.com/companies
     // For now, this is a stub implementation that could be enhanced with actual API/scraping
     // TODO: Implement actual YC company search
@@ -424,7 +424,7 @@ fn search_yc_company(name: &str) -> Result<YCCompanyInfo> {
     })
 }
 
-fn search_hn_mentions(name: &str) -> Result<i64> {
+fn search_hn_mentions(_name: &str) -> Result<i64> {
     // Use HN Algolia API to search for mentions
     // https://hn.algolia.com/api
     // For now, this is a stub implementation
