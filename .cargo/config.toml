@@ -1,0 +1,4 @@
+[build]
+# Treat all warnings as errors during compilation and testing
+# This ensures no code with warnings makes it to main
+rustflags = ["-D", "warnings"]
