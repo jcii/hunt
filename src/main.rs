@@ -1,4 +1,5 @@
 mod ai;
+mod browser;
 mod db;
 mod email;
 mod models;
@@ -8,7 +9,6 @@ use clap::{Parser, Subcommand};
 use db::Database;
 use email::{EmailConfig, EmailIngester};
 use models::{BaseResume, Employer, Job};
-use scraper::{Html, Selector};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -1485,57 +1485,11 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 fn fetch_job_description(url: &str) -> Result<String> {
-    // Fetch the HTML content
-    let response = reqwest::blocking::get(url)
-        .context("Failed to fetch URL")?;
+    // Use browser automation to fetch job description
+    // This handles JavaScript-rendered content and "Show more" buttons
+    println!("Initializing browser...");
+    let fetcher = browser::JobFetcher::new()
+        .context("Failed to initialize browser. Make sure Chrome is available.")?;
 
-    let html_content = response.text()
-        .context("Failed to read response body")?;
-
-    // Parse HTML
-    let document = Html::parse_document(&html_content);
-
-    // Try to extract job description - common patterns
-    let selectors = [
-        // LinkedIn job descriptions
-        ".description__text",
-        ".show-more-less-html__markup",
-        // Indeed job descriptions
-        "#jobDescriptionText",
-        ".jobsearch-jobDescriptionText",
-        // Generic fallbacks
-        "[class*='description']",
-        "[class*='job-description']",
-        "[id*='description']",
-        "article",
-        "main",
-    ];
-
-    for selector_str in &selectors {
-        if let Ok(selector) = Selector::parse(selector_str) {
-            if let Some(element) = document.select(&selector).next() {
-                let text = element.text().collect::<Vec<_>>().join(" ");
-                let trimmed = text.trim();
-
-                // If we found substantial content, use it
-                if trimmed.len() > 100 {
-                    return Ok(trimmed.to_string());
-                }
-            }
-        }
-    }
-
-    // Fallback: extract all text from body if no specific description found
-    if let Ok(body_selector) = Selector::parse("body") {
-        if let Some(body) = document.select(&body_selector).next() {
-            let text = body.text().collect::<Vec<_>>().join(" ");
-            let trimmed = text.trim();
-
-            if !trimmed.is_empty() {
-                return Ok(trimmed.to_string());
-            }
-        }
-    }
-
-    Err(anyhow!("Could not extract job description from page"))
+    fetcher.fetch_job_description(url)
 }
