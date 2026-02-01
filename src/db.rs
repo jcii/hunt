@@ -519,7 +519,7 @@ impl Database {
             params.push(emp.to_string());
         }
 
-        sql.push_str(" ORDER BY j.created_at DESC");
+        sql.push_str(" ORDER BY j.id ASC");
 
         let mut stmt = self.conn.prepare(&sql)?;
 

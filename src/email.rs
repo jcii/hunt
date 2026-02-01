@@ -241,7 +241,21 @@ fn is_navigation_artifact(text: &str) -> bool {
         return true;
     }
 
+    // Filter titles ending in " jobs" (e.g., "Engineering Manager jobs")
+    // These are usually links to search results, not actual job postings
+    if text_trimmed.ends_with(" jobs") || text_trimmed.ends_with(" Jobs") {
+        return true;
+    }
+
     false
+}
+
+fn is_search_link(url: &str) -> bool {
+    // Filter LinkedIn search URLs
+    // Examples:
+    // - https://www.linkedin.com/comm/jobs/search
+    // - https://www.linkedin.com/comm/jobs/search?keywords=...
+    url.contains("/jobs/search") || url.contains("/search?")
 }
 
 fn parse_linkedin_email(_subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
@@ -268,6 +282,11 @@ fn parse_linkedin_email(_subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
 
             // Skip navigation artifacts
             if is_navigation_artifact(text) {
+                continue;
+            }
+
+            // Skip search result links
+            if is_search_link(href) {
                 continue;
             }
 
@@ -327,6 +346,11 @@ fn parse_indeed_email(_subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
 
             // Skip navigation artifacts
             if is_navigation_artifact(text) {
+                continue;
+            }
+
+            // Skip search result links
+            if is_search_link(href) {
                 continue;
             }
 
@@ -648,6 +672,35 @@ mod tests {
         assert!(is_navigation_artifact(""));
         // Whitespace only should be filtered (trimmed to empty)
         assert!(is_navigation_artifact("   "));
+    }
+
+    #[test]
+    fn test_is_navigation_artifact_filters_search_titles() {
+        // Filter titles ending in " jobs" - these are search result links
+        assert!(is_navigation_artifact("Engineering Manager jobs"));
+        assert!(is_navigation_artifact("Full Stack Engineer jobs"));
+        assert!(is_navigation_artifact("Software Developer jobs"));
+        assert!(is_navigation_artifact("DevOps Engineer Jobs"));
+
+        // But allow actual job titles with "jobs" in the middle
+        assert!(!is_navigation_artifact("Jobs Program Manager at Google"));
+        assert!(!is_navigation_artifact("Steve Jobs Memorial Engineer"));
+    }
+
+    #[test]
+    fn test_is_search_link() {
+        // LinkedIn search URLs
+        assert!(is_search_link("https://www.linkedin.com/comm/jobs/search"));
+        assert!(is_search_link("https://www.linkedin.com/comm/jobs/search?keywords=Engineering+Manager"));
+        assert!(is_search_link("https://www.linkedin.com/jobs/search?keywords=test"));
+
+        // Indeed search URLs
+        assert!(is_search_link("https://www.indeed.com/jobs/search?q=engineer"));
+
+        // Valid job URLs (not search)
+        assert!(!is_search_link("https://www.linkedin.com/jobs/view/123456"));
+        assert!(!is_search_link("https://www.linkedin.com/comm/jobs/view/123456"));
+        assert!(!is_search_link("https://www.indeed.com/viewjob?jk=abc123"));
     }
 
     #[test]

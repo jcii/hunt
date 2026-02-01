@@ -639,8 +639,8 @@ fn main() -> Result<()> {
             if jobs.is_empty() {
                 println!("No jobs found.");
             } else {
-                println!("{:<6} {:<12} {:<30} {:<20} {:>12}", "ID", "STATUS", "TITLE", "EMPLOYER", "PAY RANGE");
-                println!("{}", "-".repeat(84));
+                println!("{:<6} {:<10} {:<40} {:<25} {:>15} {:<60}", "ID", "STATUS", "TITLE", "EMPLOYER", "PAY RANGE", "URL");
+                println!("{}", "-".repeat(160));
                 for job in jobs {
                     let pay = match (job.pay_min, job.pay_max) {
                         (Some(min), Some(max)) => format!("${}-${}", min / 1000, max / 1000),
@@ -648,13 +648,15 @@ fn main() -> Result<()> {
                         (None, Some(max)) => format!("<${}", max / 1000),
                         (None, None) => "-".to_string(),
                     };
+                    let url = job.url.as_deref().unwrap_or("-");
                     println!(
-                        "{:<6} {:<12} {:<30} {:<20} {:>12}",
+                        "{:<6} {:<10} {:<40} {:<25} {:>15} {:<60}",
                         job.id,
                         job.status,
-                        truncate(&job.title, 28),
-                        truncate(&job.employer_name.unwrap_or_default(), 18),
-                        pay
+                        truncate(&job.title, 38),
+                        truncate(&job.employer_name.unwrap_or_default(), 23),
+                        pay,
+                        truncate(url, 58)
                     );
                 }
             }
