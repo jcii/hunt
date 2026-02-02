@@ -127,6 +127,10 @@ enum Commands {
     Fetch {
         /// Job ID to fetch
         id: i64,
+
+        /// Run browser in headless mode (may not work with LinkedIn auth)
+        #[arg(long)]
+        headless: bool,
     },
 
     /// AI-powered job analysis
@@ -1353,7 +1357,7 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Fetch { id } => {
+        Commands::Fetch { id, headless } => {
             db.ensure_initialized()?;
 
             // Get job from database
@@ -1362,9 +1366,12 @@ fn main() -> Result<()> {
 
             if let Some(url) = &job.url {
                 println!("Fetching job description from: {}", url);
+                if headless {
+                    println!("Running in headless mode (may not work with LinkedIn auth)");
+                }
 
                 // Fetch and extract description
-                let description = fetch_job_description(url)?;
+                let description = fetch_job_description(url, headless)?;
 
                 // Update job with description
                 db.update_job_description(id, &description)?;
@@ -1484,11 +1491,11 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn fetch_job_description(url: &str) -> Result<String> {
+fn fetch_job_description(url: &str, headless: bool) -> Result<String> {
     // Use browser automation to fetch job description
     // This handles JavaScript-rendered content and "Show more" buttons
     println!("Initializing browser...");
-    let fetcher = browser::JobFetcher::new()
+    let fetcher = browser::JobFetcher::new(headless)
         .context("Failed to initialize browser. Make sure Chrome is available.")?;
 
     fetcher.fetch_job_description(url)

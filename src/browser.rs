@@ -10,14 +10,14 @@ pub struct JobFetcher {
 }
 
 impl JobFetcher {
-    pub fn new() -> Result<Self> {
+    pub fn new(headless: bool) -> Result<Self> {
         // Use the user's Chrome profile to access logged-in LinkedIn session
         // Default Chrome profile location on Linux: ~/.config/google-chrome/Default
         let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/home"));
         let user_data_dir = PathBuf::from(&home).join(".config/google-chrome");
 
         let launch_options = LaunchOptions {
-            headless: false, // Run in non-headless mode to use existing profile
+            headless,
             sandbox: true,
             user_data_dir: Some(user_data_dir),
             path: default_executable().ok(),
@@ -47,6 +47,16 @@ impl JobFetcher {
 
         // Wait a bit more for LinkedIn's dynamic content
         thread::sleep(Duration::from_secs(2));
+
+        // Check for LinkedIn auth wall
+        if self.check_auth_required(&tab)? {
+            return Err(anyhow!(
+                "LinkedIn authentication required. Please:\n\
+                 1. Make sure you're logged into LinkedIn in your Chrome browser\n\
+                 2. Close all Chrome windows before running 'hunt fetch'\n\
+                 3. Try running without --headless flag"
+            ));
+        }
 
         // Try to find and click "Show more" button
         println!("Looking for 'Show more' button...");
@@ -105,6 +115,30 @@ impl JobFetcher {
 
         Ok(text)
     }
+
+    fn check_auth_required(&self, tab: &headless_chrome::Tab) -> Result<bool> {
+        // Check for common LinkedIn auth/login indicators
+        let auth_indicators = vec![
+            "input[name='session_key']",  // Login form
+            "input[name='session_password']",  // Login form
+            ".authwall",  // Auth wall class
+            "button[aria-label*='Sign in']",  // Sign in button
+        ];
+
+        for selector in &auth_indicators {
+            if tab.find_element(selector).is_ok() {
+                return Ok(true);
+            }
+        }
+
+        // Check if URL redirected to login page
+        let url = tab.get_url();
+        if url.contains("/login") || url.contains("/authwall") {
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
 }
 
 #[cfg(test)]
@@ -114,7 +148,7 @@ mod tests {
     #[test]
     #[ignore] // Ignore by default since it requires network/browser
     fn test_fetch_job_description() {
-        let fetcher = JobFetcher::new().expect("Failed to create fetcher");
+        let fetcher = JobFetcher::new(false).expect("Failed to create fetcher");
         let url = "https://www.linkedin.com/jobs/view/1234567890";
         let result = fetcher.fetch_job_description(url);
 
