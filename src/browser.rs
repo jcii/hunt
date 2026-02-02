@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use headless_chrome::browser::default_executable;
 use headless_chrome::{Browser, LaunchOptions};
 use std::path::PathBuf;
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -11,6 +12,18 @@ pub struct JobFetcher {
 
 impl JobFetcher {
     pub fn new(headless: bool) -> Result<Self> {
+        // Check if Chrome is already running
+        if Self::is_chrome_running()? {
+            return Err(anyhow!(
+                "Chrome is already running. Please close all Chrome windows and try again.\n\
+                 \n\
+                 This command needs exclusive access to your Chrome profile to access\n\
+                 your logged-in LinkedIn session.\n\
+                 \n\
+                 To check running Chrome processes: ps aux | grep chrome"
+            ));
+        }
+
         // Use the user's Chrome profile to access logged-in LinkedIn session
         // Default Chrome profile location on Linux: ~/.config/google-chrome/Default
         let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/home"));
@@ -24,8 +37,9 @@ impl JobFetcher {
             ..Default::default()
         };
 
+        println!("Launching Chrome with user profile...");
         let browser = Browser::new(launch_options)
-            .context("Failed to launch Chrome. Make sure Chrome is installed and not already running with the same profile.")?;
+            .context("Failed to launch Chrome. Make sure Chrome is installed.")?;
 
         Ok(JobFetcher { browser })
     }
@@ -114,6 +128,28 @@ impl JobFetcher {
         }
 
         Ok(text)
+    }
+
+    fn is_chrome_running() -> Result<bool> {
+        // Check if Chrome/Chromium processes are running
+        let output = Command::new("pgrep")
+            .arg("-f")
+            .arg("chrome|chromium")
+            .output();
+
+        match output {
+            Ok(result) => Ok(!result.stdout.is_empty()),
+            Err(_) => {
+                // If pgrep isn't available, try ps as fallback
+                let ps_output = Command::new("ps")
+                    .arg("aux")
+                    .output()
+                    .context("Failed to check for running Chrome processes")?;
+
+                let output_str = String::from_utf8_lossy(&ps_output.stdout);
+                Ok(output_str.contains("/chrome ") || output_str.contains("/chromium "))
+            }
+        }
     }
 
     fn check_auth_required(&self, tab: &headless_chrome::Tab) -> Result<bool> {
