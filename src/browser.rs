@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use headless_chrome::browser::default_executable;
 use headless_chrome::{Browser, LaunchOptions};
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
@@ -25,15 +26,25 @@ impl JobFetcher {
         }
 
         // Use the user's Chrome profile to access logged-in LinkedIn session
-        // Default Chrome profile location on Linux: ~/.config/google-chrome/Default
+        // Default Chrome profile location on Linux: ~/.config/google-chrome
         let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/home"));
         let user_data_dir = PathBuf::from(&home).join(".config/google-chrome");
+
+        // Args to prevent session restore and specify profile
+        let args: Vec<&OsStr> = vec![
+            OsStr::new("--no-first-run"),
+            OsStr::new("--no-default-browser-check"),
+            OsStr::new("--disable-restore-session-state"),
+            OsStr::new("--disable-session-crashed-bubble"),
+            OsStr::new("--profile-directory=Default"),
+        ];
 
         let launch_options = LaunchOptions {
             headless,
             sandbox: true,
             user_data_dir: Some(user_data_dir),
             path: default_executable().ok(),
+            args,
             ..Default::default()
         };
 
