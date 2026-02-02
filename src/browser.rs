@@ -56,25 +56,37 @@ impl JobFetcher {
     }
 
     pub fn fetch_job_description(&self, url: &str) -> Result<String> {
-        println!("Launching browser and navigating to job...");
+        use std::io::{self, Write};
 
+        print!("Creating new browser tab... ");
+        io::stdout().flush().unwrap();
         let tab = self.browser.new_tab()
             .context("Failed to create new browser tab")?;
+        println!("✓");
 
         // Navigate to the job URL
-        println!("Navigating to: {}", url);
+        print!("Navigating to: {} ... ", url);
+        io::stdout().flush().unwrap();
         tab.navigate_to(url)
             .context("Failed to navigate to job URL")?;
+        println!("✓");
 
         // Wait for page to load
-        println!("Waiting for page to load...");
-        thread::sleep(Duration::from_secs(3));
-
-        // Wait a bit more for LinkedIn's dynamic content
-        thread::sleep(Duration::from_secs(2));
+        print!("Waiting for page to load");
+        io::stdout().flush().unwrap();
+        for _ in 0..5 {
+            thread::sleep(Duration::from_secs(1));
+            print!(".");
+            io::stdout().flush().unwrap();
+        }
+        println!(" ✓");
 
         // Check for LinkedIn auth wall
+        print!("Checking authentication status... ");
+        io::stdout().flush().unwrap();
         if self.check_auth_required(&tab)? {
+            println!("✗");
+
             return Err(anyhow!(
                 "LinkedIn authentication required. Please:\n\
                  1. Make sure you're logged into LinkedIn in your Chrome browser\n\
@@ -82,9 +94,11 @@ impl JobFetcher {
                  3. Try running without --headless flag"
             ));
         }
+        println!("✓");
 
         // Try to find and click "Show more" button
-        println!("Looking for 'Show more' button...");
+        print!("Looking for 'Show more' button... ");
+        io::stdout().flush().unwrap();
         let show_more_selectors = vec![
             "button.show-more-less-html__button",
             "button.show-more-less-html__button--more",
@@ -93,15 +107,21 @@ impl JobFetcher {
             "button[aria-label*='See more']",
         ];
 
+        let mut found_button = false;
         for selector in &show_more_selectors {
             if let Ok(element) = tab.find_element(selector) {
-                println!("Found 'Show more' button with selector: {}", selector);
+                println!("✓\nClicking 'Show more' button... ");
+                io::stdout().flush().unwrap();
                 if element.click().is_ok() {
-                    println!("Clicked 'Show more', waiting for content...");
+                    println!("✓");
                     thread::sleep(Duration::from_secs(2));
+                    found_button = true;
                     break;
                 }
             }
+        }
+        if !found_button {
+            println!("(not found, continuing anyway)");
         }
 
         // Extract job description
