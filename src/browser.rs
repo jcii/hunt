@@ -77,7 +77,32 @@ impl JobFetcher {
         io::stdout().flush().unwrap();
 
         match tab.navigate_to(url) {
-            Ok(_) => println!("✓"),
+            Ok(_) => {
+                println!("✓");
+
+                // Verify navigation worked
+                thread::sleep(Duration::from_secs(2));
+                let current_url = tab.get_url();
+                println!("Current URL: {}", current_url);
+
+                // Get page title to verify page loaded
+                if let Ok(title_element) = tab.find_element("title") {
+                    if let Ok(title) = title_element.get_inner_text() {
+                        println!("Page title: {}", title);
+                    }
+                }
+
+                // Check if we're on the right page
+                if !current_url.contains("linkedin.com") {
+                    println!("WARNING: Not on LinkedIn! Dumping page HTML...");
+                    if let Ok(body) = tab.find_element("body") {
+                        if let Ok(html) = body.get_inner_text() {
+                            println!("Page content (first 500 chars):\n{}", &html[..html.len().min(500)]);
+                        }
+                    }
+                    return Err(anyhow!("Navigation failed - ended up at: {}", current_url));
+                }
+            }
             Err(e) => {
                 return Err(anyhow!("Failed to navigate to job URL: {}", e));
             }
