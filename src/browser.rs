@@ -37,6 +37,9 @@ impl JobFetcher {
             OsStr::new("--disable-restore-session-state"),
             OsStr::new("--disable-session-crashed-bubble"),
             OsStr::new("--profile-directory=Default"),
+            OsStr::new("--disable-features=TranslateUI"),
+            OsStr::new("--disable-sync"),
+            OsStr::new("about:blank"),  // Start with blank page
         ];
 
         let launch_options = LaunchOptions {
@@ -58,18 +61,16 @@ impl JobFetcher {
     pub fn fetch_job_description(&self, url: &str) -> Result<String> {
         use std::io::{self, Write};
 
-        print!("Creating new browser tab... ");
+        print!("Waiting for browser to initialize... ");
         io::stdout().flush().unwrap();
-
-        // Wait a moment for browser to fully initialize
-        thread::sleep(Duration::from_secs(2));
-
-        let tab = self.browser.new_tab()
-            .context("Failed to create new browser tab. Browser may not have launched properly.")?;
+        thread::sleep(Duration::from_secs(3));
         println!("✓");
 
-        // Wait for tab to be ready
-        thread::sleep(Duration::from_secs(1));
+        print!("Creating new browser tab... ");
+        io::stdout().flush().unwrap();
+        let tab = self.browser.new_tab()
+            .context("Failed to create new browser tab")?;
+        println!("✓");
 
         // Navigate to the job URL
         print!("Navigating to: {} ... ", url);
