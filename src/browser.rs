@@ -76,16 +76,22 @@ impl JobFetcher {
         let initial_url = tab.get_url();
         println!("Initial URL: {}", initial_url);
 
-        // Navigate to the job URL
+        // Navigate to the job URL using JavaScript (more reliable than navigate_to)
         print!("Navigating to: {} ... ", url);
         io::stdout().flush().unwrap();
 
-        // Try navigation with explicit wait
-        match tab.navigate_to(url) {
-            Ok(_) => println!("navigate_to() returned Ok"),
+        let nav_script = format!("window.location.href = '{}';", url);
+        match tab.evaluate(&nav_script, false) {
+            Ok(_) => println!("JavaScript navigation executed"),
             Err(e) => {
-                println!("navigate_to() returned Err: {}", e);
-                return Err(anyhow!("Failed to call navigate_to: {}", e));
+                println!("JavaScript navigation failed, trying navigate_to: {}", e);
+                match tab.navigate_to(url) {
+                    Ok(_) => println!("navigate_to() returned Ok"),
+                    Err(e2) => {
+                        println!("navigate_to() also failed: {}", e2);
+                        return Err(anyhow!("Both navigation methods failed: {} / {}", e, e2));
+                    }
+                }
             }
         }
 
