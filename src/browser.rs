@@ -60,16 +60,27 @@ impl JobFetcher {
 
         print!("Creating new browser tab... ");
         io::stdout().flush().unwrap();
+
+        // Wait a moment for browser to fully initialize
+        thread::sleep(Duration::from_secs(2));
+
         let tab = self.browser.new_tab()
-            .context("Failed to create new browser tab")?;
+            .context("Failed to create new browser tab. Browser may not have launched properly.")?;
         println!("✓");
+
+        // Wait for tab to be ready
+        thread::sleep(Duration::from_secs(1));
 
         // Navigate to the job URL
         print!("Navigating to: {} ... ", url);
         io::stdout().flush().unwrap();
-        tab.navigate_to(url)
-            .context("Failed to navigate to job URL")?;
-        println!("✓");
+
+        match tab.navigate_to(url) {
+            Ok(_) => println!("✓"),
+            Err(e) => {
+                return Err(anyhow!("Failed to navigate to job URL: {}", e));
+            }
+        }
 
         // Wait for page to load
         print!("Waiting for page to load");
@@ -162,10 +173,11 @@ impl JobFetcher {
     }
 
     fn is_chrome_running() -> Result<bool> {
-        // Check if Chrome/Chromium processes are running
+        // Check if actual Chrome/Chromium browser processes are running
+        // (not Electron apps like Cursor, GitKraken, etc.)
         let output = Command::new("pgrep")
             .arg("-f")
-            .arg("chrome|chromium")
+            .arg("/opt/google/chrome/chrome|/usr/bin/chromium|/usr/bin/google-chrome")
             .output();
 
         match output {
@@ -178,7 +190,10 @@ impl JobFetcher {
                     .context("Failed to check for running Chrome processes")?;
 
                 let output_str = String::from_utf8_lossy(&ps_output.stdout);
-                Ok(output_str.contains("/chrome ") || output_str.contains("/chromium "))
+                // Look for actual Chrome binary paths, not Electron apps
+                Ok(output_str.contains("/opt/google/chrome/chrome ")
+                    || output_str.contains("/usr/bin/chromium ")
+                    || output_str.contains("/usr/bin/google-chrome "))
             }
         }
     }
