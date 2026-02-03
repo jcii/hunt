@@ -72,39 +72,53 @@ impl JobFetcher {
             .context("Failed to create new browser tab")?;
         println!("✓");
 
+        // Get initial URL for comparison
+        let initial_url = tab.get_url();
+        println!("Initial URL: {}", initial_url);
+
         // Navigate to the job URL
         print!("Navigating to: {} ... ", url);
         io::stdout().flush().unwrap();
 
+        // Try navigation with explicit wait
         match tab.navigate_to(url) {
-            Ok(_) => {
-                println!("✓");
-
-                // Verify navigation worked
-                thread::sleep(Duration::from_secs(2));
-                let current_url = tab.get_url();
-                println!("Current URL: {}", current_url);
-
-                // Get page title to verify page loaded
-                if let Ok(title_element) = tab.find_element("title") {
-                    if let Ok(title) = title_element.get_inner_text() {
-                        println!("Page title: {}", title);
-                    }
-                }
-
-                // Check if we're on the right page
-                if !current_url.contains("linkedin.com") {
-                    println!("WARNING: Not on LinkedIn! Dumping page HTML...");
-                    if let Ok(body) = tab.find_element("body") {
-                        if let Ok(html) = body.get_inner_text() {
-                            println!("Page content (first 500 chars):\n{}", &html[..html.len().min(500)]);
-                        }
-                    }
-                    return Err(anyhow!("Navigation failed - ended up at: {}", current_url));
-                }
-            }
+            Ok(_) => println!("navigate_to() returned Ok"),
             Err(e) => {
-                return Err(anyhow!("Failed to navigate to job URL: {}", e));
+                println!("navigate_to() returned Err: {}", e);
+                return Err(anyhow!("Failed to call navigate_to: {}", e));
+            }
+        }
+
+        // Wait and check if URL actually changed
+        print!("Waiting for navigation to complete... ");
+        io::stdout().flush().unwrap();
+
+        for i in 0..10 {
+            thread::sleep(Duration::from_millis(500));
+            let current_url = tab.get_url();
+
+            if current_url != initial_url && current_url.contains("linkedin.com") {
+                println!("✓");
+                println!("Successfully navigated to: {}", current_url);
+                break;
+            }
+
+            if i == 9 {
+                println!("✗");
+                println!("Navigation timeout. Current URL: {}", current_url);
+
+                // Dump page state for debugging
+                if let Ok(body) = tab.find_element("body") {
+                    if let Ok(html) = body.get_inner_text() {
+                        let preview = &html[..html.len().min(500)];
+                        println!("Page content:\n{}", preview);
+                    }
+                }
+
+                return Err(anyhow!(
+                    "Navigation failed - URL didn't change from '{}' to target '{}'",
+                    initial_url, url
+                ));
             }
         }
 
