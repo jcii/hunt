@@ -1495,8 +1495,17 @@ fn fetch_job_description(url: &str, headless: bool) -> Result<String> {
     // Use browser automation to fetch job description
     // This handles JavaScript-rendered content and "Show more" buttons
     println!("Initializing browser...");
-    let fetcher = browser::JobFetcher::new(headless)
-        .context("Failed to initialize browser. Make sure Chrome is available.")?;
 
-    fetcher.fetch_job_description(url)
+    // Create a tokio runtime to run async code
+    let rt = tokio::runtime::Runtime::new()
+        .context("Failed to create tokio runtime")?;
+
+    rt.block_on(async {
+        let fetcher = browser::JobFetcher::new(headless)
+            .await
+            .context("Failed to initialize browser. Make sure geckodriver is running.\n\
+                     Start it with: geckodriver --port 4444")?;
+
+        fetcher.fetch_job_description(url).await
+    })
 }

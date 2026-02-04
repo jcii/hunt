@@ -1,161 +1,81 @@
 use anyhow::{anyhow, Context, Result};
-use headless_chrome::browser::default_executable;
-use headless_chrome::{Browser, LaunchOptions};
-use std::ffi::OsStr;
-use std::path::PathBuf;
 use std::process::Command;
-use std::thread;
-use std::time::Duration;
+use thirtyfour::prelude::*;
 
 pub struct JobFetcher {
-    browser: Browser,
+    driver: WebDriver,
 }
 
 impl JobFetcher {
-    pub fn new(headless: bool) -> Result<Self> {
-        // Check if Chrome is already running
-        if Self::is_chrome_running()? {
+    pub async fn new(headless: bool) -> Result<Self> {
+        // Check if Firefox is already running with the profile we need
+        if Self::is_firefox_running()? {
             return Err(anyhow!(
-                "Chrome is already running. Please close all Chrome windows and try again.\n\
+                "Firefox is already running. Close Firefox and try again immediately.\n\
                  \n\
-                 This command needs exclusive access to your Chrome profile to access\n\
-                 your logged-in LinkedIn session.\n\
+                 Why: geckodriver needs exclusive access to your Firefox profile to use\n\
+                 your logged-in LinkedIn session. The profile can't be used by two processes.\n\
                  \n\
-                 To check running Chrome processes: ps aux | grep chrome"
+                 Steps:\n\
+                 1. Close all Firefox windows (or run: pkill firefox)\n\
+                 2. Run this command again right away\n\
+                 3. geckodriver will start Firefox with your profile and LinkedIn cookies"
             ));
         }
 
-        // Use the user's Chrome profile to access logged-in LinkedIn session
-        // Default Chrome profile location on Linux: ~/.config/google-chrome
-        let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/home"));
-        let user_data_dir = PathBuf::from(&home).join(".config/google-chrome");
+        // Firefox profile location (snap Firefox)
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home".to_string());
+        let firefox_profile_dir = format!("{}/snap/firefox/common/.mozilla/firefox/5krdosdy.default", home);
 
-        // Args to prevent session restore and specify profile
-        let args: Vec<&OsStr> = vec![
-            OsStr::new("--no-first-run"),
-            OsStr::new("--no-default-browser-check"),
-            OsStr::new("--disable-restore-session-state"),
-            OsStr::new("--disable-session-crashed-bubble"),
-            OsStr::new("--profile-directory=Default"),
-            OsStr::new("--disable-features=TranslateUI"),
-            OsStr::new("--disable-sync"),
-            OsStr::new("about:blank"),  // Start with blank page
-        ];
+        println!("Using Firefox profile: {}", firefox_profile_dir);
 
-        let launch_options = LaunchOptions {
-            headless,
-            sandbox: true,
-            user_data_dir: Some(user_data_dir),
-            path: default_executable().ok(),
-            args,
-            ..Default::default()
-        };
+        // Create Firefox capabilities with user profile
+        let mut caps = DesiredCapabilities::firefox();
 
-        println!("Launching Chrome with user profile...");
-        let browser = Browser::new(launch_options)
-            .context("Failed to launch Chrome. Make sure Chrome is installed.")?;
+        // Add Firefox args to specify profile
+        caps.add_arg("-profile")?;
+        caps.add_arg(&firefox_profile_dir)?;
 
-        Ok(JobFetcher { browser })
+        if headless {
+            caps.set_headless()?;
+        }
+
+        println!("Starting geckodriver...");
+
+        // Connect to geckodriver
+        // thirtyfour expects geckodriver to be running separately
+        // We'll use the default geckodriver URL
+        let driver = WebDriver::new("http://localhost:4444", caps)
+            .await
+            .context("Failed to connect to geckodriver. Make sure geckodriver is running.\n\
+                     You can start it with: geckodriver --port 4444")?;
+
+        Ok(JobFetcher { driver })
     }
 
-    pub fn fetch_job_description(&self, url: &str) -> Result<String> {
-        use std::io::{self, Write};
+    pub async fn fetch_job_description(&self, url: &str) -> Result<String> {
+        println!("Navigating to: {}", url);
 
-        print!("Waiting for browser to initialize... ");
-        io::stdout().flush().unwrap();
-        thread::sleep(Duration::from_secs(3));
-        println!("✓");
+        // Navigate to the job URL
+        self.driver.goto(url).await
+            .context("Failed to navigate to LinkedIn job URL")?;
 
-        print!("Creating new browser tab... ");
-        io::stdout().flush().unwrap();
-        let tab = self.browser.new_tab()
-            .context("Failed to create new browser tab")?;
-        println!("✓");
+        println!("Waiting for page to load...");
 
-        // Get initial URL for comparison
-        let initial_url = tab.get_url();
-        println!("Initial URL: {}", initial_url);
-
-        // Navigate to the job URL using JavaScript (more reliable than navigate_to)
-        print!("Navigating to: {} ... ", url);
-        io::stdout().flush().unwrap();
-
-        let nav_script = format!("window.location.href = '{}';", url);
-        match tab.evaluate(&nav_script, false) {
-            Ok(_) => println!("JavaScript navigation executed"),
-            Err(e) => {
-                println!("JavaScript navigation failed, trying navigate_to: {}", e);
-                match tab.navigate_to(url) {
-                    Ok(_) => println!("navigate_to() returned Ok"),
-                    Err(e2) => {
-                        println!("navigate_to() also failed: {}", e2);
-                        return Err(anyhow!("Both navigation methods failed: {} / {}", e, e2));
-                    }
-                }
-            }
-        }
-
-        // Wait and check if URL actually changed
-        print!("Waiting for navigation to complete... ");
-        io::stdout().flush().unwrap();
-
-        for i in 0..10 {
-            thread::sleep(Duration::from_millis(500));
-            let current_url = tab.get_url();
-
-            if current_url != initial_url && current_url.contains("linkedin.com") {
-                println!("✓");
-                println!("Successfully navigated to: {}", current_url);
-                break;
-            }
-
-            if i == 9 {
-                println!("✗");
-                println!("Navigation timeout. Current URL: {}", current_url);
-
-                // Dump page state for debugging
-                if let Ok(body) = tab.find_element("body") {
-                    if let Ok(html) = body.get_inner_text() {
-                        let preview = &html[..html.len().min(500)];
-                        println!("Page content:\n{}", preview);
-                    }
-                }
-
-                return Err(anyhow!(
-                    "Navigation failed - URL didn't change from '{}' to target '{}'",
-                    initial_url, url
-                ));
-            }
-        }
-
-        // Wait for page to load
-        print!("Waiting for page to load");
-        io::stdout().flush().unwrap();
-        for _ in 0..5 {
-            thread::sleep(Duration::from_secs(1));
-            print!(".");
-            io::stdout().flush().unwrap();
-        }
-        println!(" ✓");
+        // Wait for page to be ready
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
         // Check for LinkedIn auth wall
-        print!("Checking authentication status... ");
-        io::stdout().flush().unwrap();
-        if self.check_auth_required(&tab)? {
-            println!("✗");
-
-            return Err(anyhow!(
-                "LinkedIn authentication required. Please:\n\
-                 1. Make sure you're logged into LinkedIn in your Chrome browser\n\
-                 2. Close all Chrome windows before running 'hunt fetch'\n\
-                 3. Try running without --headless flag"
-            ));
+        println!("Checking authentication status...");
+        let auth_required = self.check_auth_required().await?;
+        if auth_required {
+            println!("⚠ LinkedIn auth wall detected, but continuing to try extraction...");
+        } else {
+            println!("✓ Authenticated");
         }
-        println!("✓");
 
         // Try to find and click "Show more" button
-        print!("Looking for 'Show more' button... ");
-        io::stdout().flush().unwrap();
+        println!("Looking for 'Show more' button...");
         let show_more_selectors = vec![
             "button.show-more-less-html__button",
             "button.show-more-less-html__button--more",
@@ -166,19 +86,16 @@ impl JobFetcher {
 
         let mut found_button = false;
         for selector in &show_more_selectors {
-            if let Ok(element) = tab.find_element(selector) {
-                println!("✓\nClicking 'Show more' button... ");
-                io::stdout().flush().unwrap();
-                if element.click().is_ok() {
-                    println!("✓");
-                    thread::sleep(Duration::from_secs(2));
-                    found_button = true;
-                    break;
-                }
+            if let Ok(element) = self.driver.find(By::Css(*selector)).await {
+                println!("✓ Found 'Show more' button, clicking...");
+                element.click().await?;
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                found_button = true;
+                break;
             }
         }
         if !found_button {
-            println!("(not found, continuing anyway)");
+            println!("(Show more button not found, continuing anyway)");
         }
 
         // Extract job description
@@ -194,10 +111,10 @@ impl JobFetcher {
         ];
 
         for selector in &description_selectors {
-            if let Ok(element) = tab.find_element(selector) {
-                if let Ok(text) = element.get_inner_text() {
+            if let Ok(element) = self.driver.find(By::Css(*selector)).await {
+                if let Ok(text) = element.text().await {
                     if !text.trim().is_empty() {
-                        println!("Successfully extracted {} characters", text.len());
+                        println!("✓ Successfully extracted {} characters", text.len());
                         return Ok(text);
                     }
                 }
@@ -206,45 +123,57 @@ impl JobFetcher {
 
         // Fallback: get all text from body
         println!("Using fallback: extracting all body text...");
-        let body = tab.find_element("body")
+        let body = self.driver.find(By::Tag("body")).await
             .context("Failed to find body element")?;
-        let text = body.get_inner_text()
+        let text = body.text().await
             .context("Failed to get body text")?;
 
         if text.trim().is_empty() {
             return Err(anyhow!("No content found on page"));
         }
 
+        println!("✓ Extracted {} characters (fallback method)", text.len());
         Ok(text)
     }
 
-    fn is_chrome_running() -> Result<bool> {
-        // Check if actual Chrome/Chromium browser processes are running
-        // (not Electron apps like Cursor, GitKraken, etc.)
+    fn is_firefox_running() -> Result<bool> {
+        // Check if Firefox browser processes are running (not geckodriver)
         let output = Command::new("pgrep")
             .arg("-f")
-            .arg("/opt/google/chrome/chrome|/usr/bin/chromium|/usr/bin/google-chrome")
+            .arg("/usr/lib/firefox/firefox")
             .output();
 
         match output {
-            Ok(result) => Ok(!result.stdout.is_empty()),
+            Ok(result) => {
+                if !result.stdout.is_empty() {
+                    return Ok(true);
+                }
+                // Also check for snap Firefox
+                let snap_check = Command::new("pgrep")
+                    .arg("-f")
+                    .arg("snap/firefox.*firefox$")
+                    .output();
+                Ok(snap_check.map(|r| !r.stdout.is_empty()).unwrap_or(false))
+            }
             Err(_) => {
                 // If pgrep isn't available, try ps as fallback
                 let ps_output = Command::new("ps")
                     .arg("aux")
                     .output()
-                    .context("Failed to check for running Chrome processes")?;
+                    .context("Failed to check for running Firefox processes")?;
 
                 let output_str = String::from_utf8_lossy(&ps_output.stdout);
-                // Look for actual Chrome binary paths, not Electron apps
-                Ok(output_str.contains("/opt/google/chrome/chrome ")
-                    || output_str.contains("/usr/bin/chromium ")
-                    || output_str.contains("/usr/bin/google-chrome "))
+                // Match Firefox browser, not geckodriver
+                Ok(output_str.lines().any(|line|
+                    (line.contains("/usr/lib/firefox/firefox") ||
+                     line.contains("snap/firefox") && line.contains("firefox ")) &&
+                    !line.contains("geckodriver")
+                ))
             }
         }
     }
 
-    fn check_auth_required(&self, tab: &headless_chrome::Tab) -> Result<bool> {
+    async fn check_auth_required(&self) -> Result<bool> {
         // Check for common LinkedIn auth/login indicators
         let auth_indicators = vec![
             "input[name='session_key']",  // Login form
@@ -254,14 +183,14 @@ impl JobFetcher {
         ];
 
         for selector in &auth_indicators {
-            if tab.find_element(selector).is_ok() {
+            if self.driver.find(By::Css(*selector)).await.is_ok() {
                 return Ok(true);
             }
         }
 
         // Check if URL redirected to login page
-        let url = tab.get_url();
-        if url.contains("/login") || url.contains("/authwall") {
+        let url = self.driver.current_url().await?;
+        if url.as_str().contains("/login") || url.as_str().contains("/authwall") {
             return Ok(true);
         }
 
@@ -269,16 +198,22 @@ impl JobFetcher {
     }
 }
 
+// Note: We don't implement Drop to quit the driver because:
+// 1. WebDriver::quit() takes ownership (consumes self)
+// 2. Drop only has &mut self, so we can't call quit()
+// 3. The user should manually close Firefox after use
+// 4. Or the driver will clean up when the process exits
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    #[ignore] // Ignore by default since it requires network/browser
-    fn test_fetch_job_description() {
-        let fetcher = JobFetcher::new(false).expect("Failed to create fetcher");
+    #[tokio::test]
+    #[ignore] // Ignore by default since it requires geckodriver running
+    async fn test_fetch_job_description() {
+        let fetcher = JobFetcher::new(false).await.expect("Failed to create fetcher");
         let url = "https://www.linkedin.com/jobs/view/1234567890";
-        let result = fetcher.fetch_job_description(url);
+        let result = fetcher.fetch_job_description(url).await;
 
         // This will likely fail without a real URL, but tests the structure
         assert!(result.is_ok() || result.is_err());
