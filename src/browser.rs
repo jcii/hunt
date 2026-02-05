@@ -98,13 +98,23 @@ impl JobFetcher {
             println!("(Show more button not found, continuing anyway)");
         }
 
-        // Extract job description
+        // Extract job description - use innerHTML to preserve structure
         println!("Extracting job description...");
+
+        // Debug: See what's on the page
+        if let Ok(body) = self.driver.find(By::Tag("body")).await {
+            if let Ok(body_text) = body.text().await {
+                println!("DEBUG: Page contains {} chars total", body_text.len());
+                if body_text.to_lowercase().contains("about the job") {
+                    println!("DEBUG: Found 'About the job' text on page");
+                }
+            }
+        }
+
         let description_selectors = vec![
             ".jobs-description__content",
-            ".jobs-box__html-content",
             ".show-more-less-html__markup",
-            ".description__text",
+            ".jobs-box__html-content",
             "div.jobs-description-content__text",
             "#job-details",
             "article.jobs-description",
@@ -112,28 +122,198 @@ impl JobFetcher {
 
         for selector in &description_selectors {
             if let Ok(element) = self.driver.find(By::Css(*selector)).await {
-                if let Ok(text) = element.text().await {
-                    if !text.trim().is_empty() {
-                        println!("✓ Successfully extracted {} characters", text.len());
-                        return Ok(text);
+                // Get HTML content to preserve structure (bullets, paragraphs)
+                if let Ok(html) = element.inner_html().await {
+                    if !html.trim().is_empty() {
+                        let cleaned = Self::extract_and_clean_text(&html)?;
+                        if !cleaned.trim().is_empty() {
+                            println!("✓ Successfully extracted {} characters from {}", cleaned.len(), selector);
+                            return Ok(cleaned);
+                        }
                     }
                 }
             }
         }
 
-        // Fallback: get all text from body
-        println!("Using fallback: extracting all body text...");
-        let body = self.driver.find(By::Tag("body")).await
-            .context("Failed to find body element")?;
-        let text = body.text().await
-            .context("Failed to get body text")?;
-
-        if text.trim().is_empty() {
-            return Err(anyhow!("No content found on page"));
+        // Ultimate fallback: get main content area and clean aggressively
+        println!("Using ultimate fallback: extracting and cleaning main content...");
+        if let Ok(main) = self.driver.find(By::Tag("main")).await {
+            if let Ok(html) = main.inner_html().await {
+                let cleaned = Self::extract_and_clean_text(&html)?;
+                if !cleaned.is_empty() {
+                    println!("✓ Extracted {} characters from main element (cleaned)", cleaned.len());
+                    return Ok(cleaned);
+                }
+            }
         }
 
-        println!("✓ Extracted {} characters (fallback method)", text.len());
-        Ok(text)
+        // Last resort: Get body text and clean it
+        if let Ok(body) = self.driver.find(By::Tag("body")).await {
+            if let Ok(html) = body.inner_html().await {
+                let cleaned = Self::extract_and_clean_text(&html)?;
+                if !cleaned.is_empty() {
+                    println!("✓ Extracted {} characters from body (cleaned)", cleaned.len());
+                    return Ok(cleaned);
+                }
+            }
+        }
+
+        Err(anyhow!("Could not extract any content from page"))
+    }
+
+    fn extract_and_clean_text(html: &str) -> Result<String> {
+        // Parse HTML and extract text while preserving structure
+        use scraper::Html;
+
+        let document = Html::parse_fragment(html);
+        let mut result = String::new();
+
+        // Selectors for elements to skip (LinkedIn UI noise)
+        let skip_patterns = vec![
+            "set alert for similar jobs",
+            "see how you compare",
+            "candidate seniority",
+            "candidate education",
+            "exclusive job seeker insights",
+            "powered by bing",
+            "company focus areas",
+            "hiring & headcount",
+            "the latest hiring trend",
+            "median employee tenure",
+            "hires candidates from",
+            "total employees",
+            "year growth",
+            "help me stand out",
+            "tailor my resume",
+            "create cover letter",
+            "show match details",
+            "people you can reach",
+            "show premium insights",
+            "more jobs",
+            "interested in working with us",
+            "privately share your profile",
+            "company photos",
+            "competitors",
+            "sources:",
+            "about the company",
+            "followers",
+            "school alumni work here",
+        ];
+
+        // Process the HTML structure
+        Self::process_node(&document.root_element(), &mut result, 0, &skip_patterns);
+
+        // Clean up excessive whitespace
+        let cleaned = result
+            .lines()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Truncate at common end-of-job-description markers
+        let end_markers = vec![
+            "… more",  // LinkedIn "show more" indicator (often marks end of actual content)
+            "More jobs",
+            "Looking for talent?",
+            "Actively reviewing applicants",
+            "LinkedIn Corporation ©",
+            "Select language",
+        ];
+
+        let mut truncated = cleaned.as_str();
+        for marker in &end_markers {
+            if let Some(pos) = cleaned.find(marker) {
+                truncated = &cleaned[..pos];
+                break;
+            }
+        }
+
+        Ok(truncated.trim().to_string())
+    }
+
+    fn process_node(
+        node: &scraper::ElementRef,
+        result: &mut String,
+        depth: usize,
+        skip_patterns: &[&str],
+    ) {
+        use scraper::Node;
+
+        for child in node.children() {
+            match child.value() {
+                Node::Element(element) => {
+                    let tag_name = element.name();
+
+                    // Skip script, style, and other non-content tags
+                    if matches!(tag_name, "script" | "style" | "noscript" | "svg" | "path") {
+                        continue;
+                    }
+
+                    if let Some(child_elem) = scraper::ElementRef::wrap(child) {
+                        // Get DIRECT text content (not all descendants) to check if we should skip
+                        let direct_text: String = child_elem.children()
+                            .filter_map(|c| {
+                                if let scraper::Node::Text(t) = c.value() {
+                                    Some(t.to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+
+                        // Skip if THIS element's direct text is JavaScript/JSON
+                        if direct_text.len() > 50 && (
+                            direct_text.contains("window.__") ||
+                            direct_text.contains("webpack") ||
+                            direct_text.contains("module_cache") ||
+                            direct_text.contains("__como_")
+                        ) {
+                            continue;
+                        }
+
+                        // Get full text content for noise pattern matching
+                        let text_content = child_elem.text().collect::<String>().to_lowercase();
+
+                        // Skip LinkedIn UI noise (only if it's a small element)
+                        if text_content.len() < 500 &&
+                           skip_patterns.iter().any(|pattern| text_content.contains(pattern)) {
+                            continue;
+                        }
+
+                        match tag_name {
+                            "li" => {
+                                // Preserve bullet points
+                                result.push_str("• ");
+                                Self::process_node(&child_elem, result, depth + 1, skip_patterns);
+                                result.push('\n');
+                            }
+                            "p" | "div" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                                Self::process_node(&child_elem, result, depth, skip_patterns);
+                                result.push('\n');
+                            }
+                            "br" => {
+                                result.push('\n');
+                            }
+                            "ul" | "ol" => {
+                                Self::process_node(&child_elem, result, depth, skip_patterns);
+                            }
+                            _ => {
+                                Self::process_node(&child_elem, result, depth, skip_patterns);
+                            }
+                        }
+                    }
+                }
+                Node::Text(text) => {
+                    let text_str = text.trim();
+                    if !text_str.is_empty() {
+                        result.push_str(text_str);
+                        result.push(' ');
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     fn is_firefox_running() -> Result<bool> {
