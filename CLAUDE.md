@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Build for development
 cargo build
 
-# Build optimized release binary
+# Build optimized release binary (MUST do this after every change)
 cargo build --release
 
 # Run the application
@@ -22,6 +22,8 @@ cargo run -- <command>
 # Install locally
 cargo install --path .
 ```
+
+**CRITICAL:** The user's `hunt` binary is symlinked from `~/.local/bin/hunt` to `target/release/hunt`. After ANY code change, you MUST run `cargo build --release` so the user's `hunt` command picks up changes. Never finish a task without doing this.
 
 ### Testing
 ```bash
@@ -76,13 +78,15 @@ cargo fmt
 - LinkedIn-specific parsing handles format: "Title             Company · Location"
 
 **AI Integration (`ai.rs`)**
-- Anthropic API client for AI-powered features
-- Job analysis and keyword extraction
-- Resume tailoring suggestions
-- Requires `ANTHROPIC_API_KEY` environment variable
+- `AIProvider` trait with three implementations:
+  - `ClaudeCodeProvider`: Shells out to `claude` CLI (uses Claude Code subscription, no API key needed)
+  - `AnthropicProvider`: Direct Anthropic API (requires `ANTHROPIC_API_KEY`)
+  - `OpenAIProvider`: OpenAI API (requires `OPENAI_API_KEY`)
+- `resolve_model()` maps short names to providers: `claude-sonnet` (default, uses CLI), `api-sonnet` (direct API), `gpt-5.2`
+- Features: job analysis, categorized keyword extraction, fit analysis, full resume tailoring
 
 **Data Models (`models.rs`)**
-- Core structs: `Job`, `Employer`, `BaseResume`, `ResumeVariant`, `GlassdoorReview`
+- Core structs: `Job`, `Employer`, `BaseResume`, `ResumeVariant`, `GlassdoorReview`, `JobKeyword`, `FitAnalysis`
 - Employers track: funding info (YC batch, Crunchbase), controversies, ownership data
 - Jobs track: status workflow (new → reviewing → applied → rejected/closed)
 
@@ -116,7 +120,9 @@ The SQLite database auto-migrates on `init()`. Key tables:
 - `employers`: Company data with research fields (startup info, controversies, ownership)
 - `jobs`: Job postings with employer FK, status, pay range, job codes
 - `job_snapshots`: Historical versions of job descriptions
-- `base_resumes` / `resume_variants`: Resume management
+- `base_resumes` / `resume_variants`: Resume management (variants track `source_model` and `output_format`)
+- `job_keywords`: Categorized keyword extraction results (mandatory/nice_to_have per model)
+- `fit_analyses`: Resume-vs-job fit analysis results (score, matches, gaps per model)
 - `glassdoor_reviews`: Employee reviews with sentiment analysis
 
 Job codes are extracted from common patterns:
@@ -140,12 +146,20 @@ Jobs are ranked by score (see `calculate_score` in `db.rs`):
 - Destroy all data: `cargo run -- destroy --confirm`
 
 ### AI Features
-Set API key before using AI commands:
+AI commands use the `claude` CLI by default (no API key needed with Claude Code subscription):
 ```bash
-export ANTHROPIC_API_KEY=your-key-here
+hunt analyze 5                          # uses claude-sonnet via CLI
+hunt keywords 5                         # categorized keywords
+hunt fit 5 --resume devops-2026         # resume fit analysis
+hunt resume tailor 5 --resume devops-2026  # full tailored resume
+hunt resume compare 5                   # compare variants
 ```
 
-AI-powered commands: `analyze`, `keywords`, `resume tailor`
+For direct API access (requires API keys):
+```bash
+hunt analyze 5 --model api-sonnet      # ANTHROPIC_API_KEY
+hunt keywords 5 --model gpt-5.2        # OPENAI_API_KEY
+```
 
 ### Email Integration
 Requires Gmail app password stored in file:
