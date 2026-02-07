@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="hunt-logo.svg" width="180" alt="hunt logo" />
+  <img src="hunt-logo.svg" width="360" alt="hunt logo" />
 </p>
 
 <h1 align="center">hunt</h1>
