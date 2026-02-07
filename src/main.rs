@@ -1371,12 +1371,18 @@ fn main() -> Result<()> {
                 }
 
                 // Fetch and extract description
-                let description = fetch_job_description(url, headless)?;
+                let job_desc = fetch_job_description(url, headless)?;
 
-                // Update job with description
-                db.update_job_description(id, &description)?;
+                // Update job with description and pay info
+                db.update_job_description(id, &job_desc.text, job_desc.pay_min, job_desc.pay_max)?;
 
-                println!("✓ Job description fetched and stored ({} chars)", description.len());
+                let pay_info = match (job_desc.pay_min, job_desc.pay_max) {
+                    (Some(min), Some(max)) => format!(" | Pay: ${}-${}", min, max),
+                    (Some(min), None) => format!(" | Pay: ${}+", min),
+                    (None, Some(max)) => format!(" | Pay: up to ${}", max),
+                    (None, None) => String::new(),
+                };
+                println!("✓ Job description fetched and stored ({} chars{})", job_desc.text.len(), pay_info);
             } else {
                 println!("Error: Job #{} has no URL", id);
                 return Err(anyhow!("Job has no URL to fetch from"));
@@ -1491,7 +1497,7 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn fetch_job_description(url: &str, headless: bool) -> Result<String> {
+fn fetch_job_description(url: &str, headless: bool) -> Result<browser::JobDescription> {
     // Use browser automation to fetch job description
     // This handles JavaScript-rendered content and "Show more" buttons
     println!("Initializing browser...");

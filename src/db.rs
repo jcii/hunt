@@ -820,12 +820,12 @@ impl Database {
         Ok(job_id)
     }
 
-    pub fn update_job_description(&self, job_id: i64, description: &str) -> Result<()> {
+    pub fn update_job_description(&self, job_id: i64, description: &str, pay_min: Option<i64>, pay_max: Option<i64>) -> Result<()> {
         self.conn.execute(
             "UPDATE jobs
-             SET raw_text = ?1, updated_at = datetime('now')
-             WHERE id = ?2",
-            params![description, job_id],
+             SET raw_text = ?1, pay_min = ?2, pay_max = ?3, updated_at = datetime('now')
+             WHERE id = ?4",
+            params![description, pay_min, pay_max, job_id],
         )?;
 
         // Create a snapshot of the new description

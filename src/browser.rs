@@ -1,6 +1,13 @@
 use anyhow::{anyhow, Context, Result};
+use regex::Regex;
 use std::process::Command;
 use thirtyfour::prelude::*;
+
+pub struct JobDescription {
+    pub text: String,
+    pub pay_min: Option<i64>,
+    pub pay_max: Option<i64>,
+}
 
 pub struct JobFetcher {
     driver: WebDriver,
@@ -53,7 +60,7 @@ impl JobFetcher {
         Ok(JobFetcher { driver })
     }
 
-    pub async fn fetch_job_description(&self, url: &str) -> Result<String> {
+    pub async fn fetch_job_description(&self, url: &str) -> Result<JobDescription> {
         println!("Navigating to: {}", url);
 
         // Navigate to the job URL
@@ -127,8 +134,16 @@ impl JobFetcher {
                     if !html.trim().is_empty() {
                         let cleaned = Self::extract_and_clean_text(&html)?;
                         if !cleaned.trim().is_empty() {
+                            let (pay_min, pay_max) = Self::parse_pay_range(&cleaned);
                             println!("✓ Successfully extracted {} characters from {}", cleaned.len(), selector);
-                            return Ok(cleaned);
+                            if pay_min.is_some() || pay_max.is_some() {
+                                println!("✓ Parsed pay range: ${:?} - ${:?}", pay_min, pay_max);
+                            }
+                            return Ok(JobDescription {
+                                text: cleaned,
+                                pay_min,
+                                pay_max,
+                            });
                         }
                     }
                 }
@@ -141,8 +156,16 @@ impl JobFetcher {
             if let Ok(html) = main.inner_html().await {
                 let cleaned = Self::extract_and_clean_text(&html)?;
                 if !cleaned.is_empty() {
+                    let (pay_min, pay_max) = Self::parse_pay_range(&cleaned);
                     println!("✓ Extracted {} characters from main element (cleaned)", cleaned.len());
-                    return Ok(cleaned);
+                    if pay_min.is_some() || pay_max.is_some() {
+                        println!("✓ Parsed pay range: ${:?} - ${:?}", pay_min, pay_max);
+                    }
+                    return Ok(JobDescription {
+                        text: cleaned,
+                        pay_min,
+                        pay_max,
+                    });
                 }
             }
         }
@@ -152,13 +175,74 @@ impl JobFetcher {
             if let Ok(html) = body.inner_html().await {
                 let cleaned = Self::extract_and_clean_text(&html)?;
                 if !cleaned.is_empty() {
+                    let (pay_min, pay_max) = Self::parse_pay_range(&cleaned);
                     println!("✓ Extracted {} characters from body (cleaned)", cleaned.len());
-                    return Ok(cleaned);
+                    if pay_min.is_some() || pay_max.is_some() {
+                        println!("✓ Parsed pay range: ${:?} - ${:?}", pay_min, pay_max);
+                    }
+                    return Ok(JobDescription {
+                        text: cleaned,
+                        pay_min,
+                        pay_max,
+                    });
                 }
             }
         }
 
         Err(anyhow!("Could not extract any content from page"))
+    }
+
+    fn parse_pay_range(text: &str) -> (Option<i64>, Option<i64>) {
+        // Pattern 1: $XXK - $YYK or $XXK/yr - $YYK/yr
+        let pattern1 = Regex::new(r"\$(\d{1,3})K(?:/yr)?\s*[-–—]\s*\$(\d{1,3})K(?:/yr)?").unwrap();
+        if let Some(caps) = pattern1.captures(text) {
+            let min = caps.get(1).and_then(|m| m.as_str().parse::<i64>().ok()).map(|n| n * 1000);
+            let max = caps.get(2).and_then(|m| m.as_str().parse::<i64>().ok()).map(|n| n * 1000);
+            return (min, max);
+        }
+
+        // Pattern 2: Compensation Range: $XXX,XXX - $YYY,YYY
+        let pattern2 = Regex::new(r"(?i)compensation.*?\$(\d{1,3}),?(\d{3})\s*[-–—]\s*\$(\d{1,3}),?(\d{3})").unwrap();
+        if let Some(caps) = pattern2.captures(text) {
+            let min = if let (Some(hundreds), Some(thousands)) = (caps.get(1), caps.get(2)) {
+                format!("{}{}", hundreds.as_str(), thousands.as_str()).parse::<i64>().ok()
+            } else {
+                None
+            };
+            let max = if let (Some(hundreds), Some(thousands)) = (caps.get(3), caps.get(4)) {
+                format!("{}{}", hundreds.as_str(), thousands.as_str()).parse::<i64>().ok()
+            } else {
+                None
+            };
+            return (min, max);
+        }
+
+        // Pattern 3: $XXX,XXX - $YYY,YYY (without "compensation" keyword)
+        let pattern3 = Regex::new(r"\$(\d{1,3}),(\d{3})\s*[-–—]\s*\$(\d{1,3}),(\d{3})").unwrap();
+        if let Some(caps) = pattern3.captures(text) {
+            let min = if let (Some(hundreds), Some(thousands)) = (caps.get(1), caps.get(2)) {
+                format!("{}{}", hundreds.as_str(), thousands.as_str()).parse::<i64>().ok()
+            } else {
+                None
+            };
+            let max = if let (Some(hundreds), Some(thousands)) = (caps.get(3), caps.get(4)) {
+                format!("{}{}", hundreds.as_str(), thousands.as_str()).parse::<i64>().ok()
+            } else {
+                None
+            };
+            return (min, max);
+        }
+
+        // Pattern 4: $XX/hr - $YY/hr (hourly, convert to yearly assuming 2080 hours)
+        let pattern4 = Regex::new(r"\$(\d{1,3})(?:\.\d{2})?/hr\s*[-–—]\s*\$(\d{1,3})(?:\.\d{2})?/hr").unwrap();
+        if let Some(caps) = pattern4.captures(text) {
+            let min = caps.get(1).and_then(|m| m.as_str().parse::<i64>().ok()).map(|n| n * 2080);
+            let max = caps.get(2).and_then(|m| m.as_str().parse::<i64>().ok()).map(|n| n * 2080);
+            return (min, max);
+        }
+
+        // No match found
+        (None, None)
     }
 
     fn extract_and_clean_text(html: &str) -> Result<String> {
