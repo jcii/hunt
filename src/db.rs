@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
 
-use crate::models::{BaseResume, Employer, GlassdoorReview, Job, ResumeVariant};
+use crate::models::{BaseResume, Employer, FitAnalysis, GlassdoorReview, Job, JobKeyword, ResumeVariant};
 
 pub struct DestructionStats {
     pub jobs: i64,
@@ -10,11 +10,14 @@ pub struct DestructionStats {
     pub employers: i64,
     pub base_resumes: i64,
     pub resume_variants: i64,
+    pub job_keywords: i64,
+    pub fit_analyses: i64,
 }
 
 impl DestructionStats {
     pub fn total(&self) -> i64 {
-        self.jobs + self.job_snapshots + self.employers + self.base_resumes + self.resume_variants
+        self.jobs + self.job_snapshots + self.employers + self.base_resumes
+            + self.resume_variants + self.job_keywords + self.fit_analyses
     }
 }
 
@@ -126,12 +129,42 @@ impl Database {
                 job_id INTEGER NOT NULL REFERENCES jobs(id),
                 content TEXT NOT NULL,
                 tailoring_notes TEXT,
+                source_model TEXT,
+                output_format TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                UNIQUE(base_resume_id, job_id)
+                UNIQUE(base_resume_id, job_id, source_model, output_format)
             );
 
             CREATE INDEX IF NOT EXISTS idx_variants_base ON resume_variants(base_resume_id);
             CREATE INDEX IF NOT EXISTS idx_variants_job ON resume_variants(job_id);
+
+            CREATE TABLE IF NOT EXISTS job_keywords (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL REFERENCES jobs(id),
+                keyword TEXT NOT NULL,
+                category TEXT NOT NULL CHECK (category IN ('mandatory', 'nice_to_have')),
+                source_model TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_job_keywords_job ON job_keywords(job_id);
+            CREATE INDEX IF NOT EXISTS idx_job_keywords_keyword ON job_keywords(keyword);
+
+            CREATE TABLE IF NOT EXISTS fit_analyses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL REFERENCES jobs(id),
+                base_resume_id INTEGER NOT NULL REFERENCES base_resumes(id),
+                source_model TEXT NOT NULL,
+                fit_score REAL NOT NULL,
+                strong_matches TEXT,
+                gaps TEXT,
+                stretch_areas TEXT,
+                narrative TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(job_id, base_resume_id, source_model)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_fit_analyses_job ON fit_analyses(job_id);
 
             CREATE TABLE IF NOT EXISTS glassdoor_reviews (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -229,6 +262,75 @@ impl Database {
                 [],
             )?;
         }
+
+        // Migrate resume_variants to add source_model and output_format columns
+        let rv_columns: Vec<String> = self.conn
+            .prepare("PRAGMA table_info(resume_variants)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if !rv_columns.is_empty() && !rv_columns.contains(&"source_model".to_string()) {
+            // Rename-copy-drop pattern to change unique constraint
+            self.conn.execute_batch(
+                r#"
+                ALTER TABLE resume_variants RENAME TO resume_variants_old;
+
+                CREATE TABLE resume_variants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    base_resume_id INTEGER NOT NULL REFERENCES base_resumes(id),
+                    job_id INTEGER NOT NULL REFERENCES jobs(id),
+                    content TEXT NOT NULL,
+                    tailoring_notes TEXT,
+                    source_model TEXT,
+                    output_format TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(base_resume_id, job_id, source_model, output_format)
+                );
+
+                INSERT INTO resume_variants (id, base_resume_id, job_id, content, tailoring_notes, created_at)
+                    SELECT id, base_resume_id, job_id, content, tailoring_notes, created_at
+                    FROM resume_variants_old;
+
+                DROP TABLE resume_variants_old;
+
+                CREATE INDEX IF NOT EXISTS idx_variants_base ON resume_variants(base_resume_id);
+                CREATE INDEX IF NOT EXISTS idx_variants_job ON resume_variants(job_id);
+                "#,
+            )?;
+        }
+
+        // Create job_keywords table if it doesn't exist
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS job_keywords (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL REFERENCES jobs(id),
+                keyword TEXT NOT NULL,
+                category TEXT NOT NULL CHECK (category IN ('mandatory', 'nice_to_have')),
+                source_model TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_job_keywords_job ON job_keywords(job_id);
+            CREATE INDEX IF NOT EXISTS idx_job_keywords_keyword ON job_keywords(keyword);
+
+            CREATE TABLE IF NOT EXISTS fit_analyses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL REFERENCES jobs(id),
+                base_resume_id INTEGER NOT NULL REFERENCES base_resumes(id),
+                source_model TEXT NOT NULL,
+                fit_score REAL NOT NULL,
+                strong_matches TEXT,
+                gaps TEXT,
+                stretch_areas TEXT,
+                narrative TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(job_id, base_resume_id, source_model)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_fit_analyses_job ON fit_analyses(job_id);
+            "#,
+        )?;
 
         Ok(())
     }
@@ -647,23 +749,14 @@ impl Database {
     }
 
     pub fn delete_job(&self, id: i64) -> Result<()> {
-        // Delete associated snapshots first (foreign key constraint)
-        self.conn.execute(
-            "DELETE FROM job_snapshots WHERE job_id = ?1",
-            [id],
-        )?;
-
-        // Delete resume variants for this job
-        self.conn.execute(
-            "DELETE FROM resume_variants WHERE job_id = ?1",
-            [id],
-        )?;
+        // Delete associated data first (foreign key constraints)
+        self.conn.execute("DELETE FROM job_snapshots WHERE job_id = ?1", [id])?;
+        self.conn.execute("DELETE FROM resume_variants WHERE job_id = ?1", [id])?;
+        self.conn.execute("DELETE FROM job_keywords WHERE job_id = ?1", [id])?;
+        self.conn.execute("DELETE FROM fit_analyses WHERE job_id = ?1", [id])?;
 
         // Delete the job
-        self.conn.execute(
-            "DELETE FROM jobs WHERE id = ?1",
-            [id],
-        )?;
+        self.conn.execute("DELETE FROM jobs WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -1035,14 +1128,16 @@ impl Database {
         job_id: i64,
         content: &str,
         tailoring_notes: Option<&str>,
+        source_model: Option<&str>,
+        output_format: Option<&str>,
     ) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO resume_variants (base_resume_id, job_id, content, tailoring_notes)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(base_resume_id, job_id) DO UPDATE SET
+            "INSERT INTO resume_variants (base_resume_id, job_id, content, tailoring_notes, source_model, output_format)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(base_resume_id, job_id, source_model, output_format) DO UPDATE SET
                 content = excluded.content,
                 tailoring_notes = excluded.tailoring_notes",
-            params![base_resume_id, job_id, content, tailoring_notes],
+            params![base_resume_id, job_id, content, tailoring_notes, source_model, output_format],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -1050,19 +1145,10 @@ impl Database {
     #[allow(dead_code)]
     pub fn get_resume_variant(&self, job_id: i64, base_resume_id: i64) -> Result<Option<ResumeVariant>> {
         let result = self.conn.query_row(
-            "SELECT id, base_resume_id, job_id, content, tailoring_notes, created_at
+            "SELECT id, base_resume_id, job_id, content, tailoring_notes, source_model, output_format, created_at
              FROM resume_variants WHERE job_id = ?1 AND base_resume_id = ?2",
             params![job_id, base_resume_id],
-            |row| {
-                Ok(ResumeVariant {
-                    id: row.get(0)?,
-                    base_resume_id: row.get(1)?,
-                    job_id: row.get(2)?,
-                    content: row.get(3)?,
-                    tailoring_notes: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            },
+            Self::row_to_resume_variant,
         );
         match result {
             Ok(variant) => Ok(Some(variant)),
@@ -1073,57 +1159,191 @@ impl Database {
 
     pub fn list_resume_variants_for_job(&self, job_id: i64) -> Result<Vec<ResumeVariant>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, base_resume_id, job_id, content, tailoring_notes, created_at
+            "SELECT id, base_resume_id, job_id, content, tailoring_notes, source_model, output_format, created_at
              FROM resume_variants WHERE job_id = ?1
              ORDER BY created_at DESC",
         )?;
 
+        let rows = stmt.query_map([job_id], Self::row_to_resume_variant)?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list resume variants")
+    }
+
+    fn row_to_resume_variant(row: &rusqlite::Row) -> rusqlite::Result<ResumeVariant> {
+        Ok(ResumeVariant {
+            id: row.get(0)?,
+            base_resume_id: row.get(1)?,
+            job_id: row.get(2)?,
+            content: row.get(3)?,
+            tailoring_notes: row.get(4)?,
+            source_model: row.get(5)?,
+            output_format: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    }
+
+    // --- Job Keywords operations ---
+
+    pub fn add_job_keywords(
+        &self,
+        job_id: i64,
+        keywords: &[String],
+        category: &str,
+        source_model: &str,
+    ) -> Result<()> {
+        // Remove existing keywords for this job/category/model before inserting
+        self.conn.execute(
+            "DELETE FROM job_keywords WHERE job_id = ?1 AND category = ?2 AND source_model = ?3",
+            params![job_id, category, source_model],
+        )?;
+
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO job_keywords (job_id, keyword, category, source_model)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?;
+
+        for keyword in keywords {
+            stmt.execute(params![job_id, keyword, category, source_model])?;
+        }
+
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn get_job_keywords(&self, job_id: i64) -> Result<Vec<JobKeyword>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, job_id, keyword, category, source_model, created_at
+             FROM job_keywords WHERE job_id = ?1
+             ORDER BY category, keyword",
+        )?;
+
         let rows = stmt.query_map([job_id], |row| {
-            Ok(ResumeVariant {
+            Ok(JobKeyword {
                 id: row.get(0)?,
-                base_resume_id: row.get(1)?,
-                job_id: row.get(2)?,
-                content: row.get(3)?,
-                tailoring_notes: row.get(4)?,
+                job_id: row.get(1)?,
+                keyword: row.get(2)?,
+                category: row.get(3)?,
+                source_model: row.get(4)?,
                 created_at: row.get(5)?,
             })
         })?;
 
         rows.collect::<Result<Vec<_>, _>>()
-            .context("Failed to list resume variants")
+            .context("Failed to list job keywords")
+    }
+
+    pub fn search_job_keywords(&self, query: &str) -> Result<Vec<(i64, String, String, String)>> {
+        let pattern = format!("%{}%", query);
+        let mut stmt = self.conn.prepare(
+            "SELECT jk.job_id, j.title, jk.keyword, jk.category
+             FROM job_keywords jk
+             JOIN jobs j ON jk.job_id = j.id
+             WHERE LOWER(jk.keyword) LIKE LOWER(?1)
+             ORDER BY jk.job_id, jk.category, jk.keyword",
+        )?;
+
+        let rows = stmt.query_map([&pattern], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to search job keywords")
+    }
+
+    // --- Fit Analysis operations ---
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_fit_analysis(
+        &self,
+        job_id: i64,
+        base_resume_id: i64,
+        source_model: &str,
+        fit_score: f64,
+        strong_matches: &[String],
+        gaps: &[String],
+        stretch_areas: &[String],
+        narrative: &str,
+    ) -> Result<i64> {
+        let strong_matches_str = strong_matches.join(", ");
+        let gaps_str = gaps.join(", ");
+        let stretch_areas_str = stretch_areas.join(", ");
+
+        self.conn.execute(
+            "INSERT INTO fit_analyses (job_id, base_resume_id, source_model, fit_score, strong_matches, gaps, stretch_areas, narrative)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(job_id, base_resume_id, source_model) DO UPDATE SET
+                fit_score = excluded.fit_score,
+                strong_matches = excluded.strong_matches,
+                gaps = excluded.gaps,
+                stretch_areas = excluded.stretch_areas,
+                narrative = excluded.narrative",
+            params![job_id, base_resume_id, source_model, fit_score, strong_matches_str, gaps_str, stretch_areas_str, narrative],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    #[allow(dead_code)]
+    pub fn get_fit_analysis(
+        &self,
+        job_id: i64,
+        base_resume_id: i64,
+        source_model: &str,
+    ) -> Result<Option<FitAnalysis>> {
+        let result = self.conn.query_row(
+            "SELECT id, job_id, base_resume_id, source_model, fit_score, strong_matches, gaps, stretch_areas, narrative, created_at
+             FROM fit_analyses WHERE job_id = ?1 AND base_resume_id = ?2 AND source_model = ?3",
+            params![job_id, base_resume_id, source_model],
+            |row| {
+                Ok(FitAnalysis {
+                    id: row.get(0)?,
+                    job_id: row.get(1)?,
+                    base_resume_id: row.get(2)?,
+                    source_model: row.get(3)?,
+                    fit_score: row.get(4)?,
+                    strong_matches: row.get(5)?,
+                    gaps: row.get(6)?,
+                    stretch_areas: row.get(7)?,
+                    narrative: row.get(8)?,
+                    created_at: row.get(9)?,
+                })
+            },
+        );
+        match result {
+            Ok(analysis) => Ok(Some(analysis)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     // --- Destruction operations ---
 
     pub fn get_destruction_stats(&self) -> Result<DestructionStats> {
         let jobs: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM jobs",
-            [],
-            |row| row.get(0),
+            "SELECT COUNT(*) FROM jobs", [], |row| row.get(0),
         )?;
-
         let job_snapshots: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM job_snapshots",
-            [],
-            |row| row.get(0),
+            "SELECT COUNT(*) FROM job_snapshots", [], |row| row.get(0),
         )?;
-
         let employers: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM employers",
-            [],
-            |row| row.get(0),
+            "SELECT COUNT(*) FROM employers", [], |row| row.get(0),
         )?;
-
         let base_resumes: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM base_resumes",
-            [],
-            |row| row.get(0),
+            "SELECT COUNT(*) FROM base_resumes", [], |row| row.get(0),
         )?;
-
         let resume_variants: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM resume_variants",
-            [],
-            |row| row.get(0),
+            "SELECT COUNT(*) FROM resume_variants", [], |row| row.get(0),
+        )?;
+        let job_keywords: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM job_keywords", [], |row| row.get(0),
+        )?;
+        let fit_analyses: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM fit_analyses", [], |row| row.get(0),
         )?;
 
         Ok(DestructionStats {
@@ -1132,11 +1352,14 @@ impl Database {
             employers,
             base_resumes,
             resume_variants,
+            job_keywords,
+            fit_analyses,
         })
     }
 
     pub fn destroy_all_data(&self) -> Result<()> {
-        // Delete all data from all tables
+        self.conn.execute("DELETE FROM fit_analyses", [])?;
+        self.conn.execute("DELETE FROM job_keywords", [])?;
         self.conn.execute("DELETE FROM resume_variants", [])?;
         self.conn.execute("DELETE FROM base_resumes", [])?;
         self.conn.execute("DELETE FROM job_snapshots", [])?;

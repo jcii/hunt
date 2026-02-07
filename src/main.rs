@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use db::Database;
 use email::{EmailConfig, EmailIngester};
-use models::{BaseResume, Employer, Job};
+use models::Employer;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -154,12 +154,39 @@ enum Commands {
     Analyze {
         /// Job ID to analyze
         job_id: i64,
+
+        /// AI model to use (default: claude-sonnet)
+        #[arg(short, long, default_value = "claude-sonnet")]
+        model: String,
     },
 
     /// Extract keywords from a job posting
     Keywords {
-        /// Job ID to extract keywords from
+        /// Job ID to extract keywords from (required unless --search is used)
+        #[arg(required_unless_present = "search")]
+        job_id: Option<i64>,
+
+        /// AI model to use (default: claude-sonnet)
+        #[arg(short, long, default_value = "claude-sonnet")]
+        model: String,
+
+        /// Search for a keyword across all jobs
+        #[arg(short, long)]
+        search: Option<String>,
+    },
+
+    /// Analyze resume fit against a job posting
+    Fit {
+        /// Job ID to compare against
         job_id: i64,
+
+        /// Base resume name or ID
+        #[arg(short, long)]
+        resume: String,
+
+        /// AI model to use (default: claude-sonnet)
+        #[arg(short, long, default_value = "claude-sonnet")]
+        model: String,
     },
 }
 
@@ -252,6 +279,18 @@ enum ResumeCommands {
         #[arg(short, long)]
         resume: String,
 
+        /// Single AI model to use (default: claude-sonnet)
+        #[arg(long, default_value = "claude-sonnet")]
+        model: String,
+
+        /// Multiple AI models (comma-separated, e.g. claude-sonnet,gpt-4o)
+        #[arg(long)]
+        models: Option<String>,
+
+        /// Output format: markdown or latex (default: markdown)
+        #[arg(short, long, default_value = "markdown")]
+        format: String,
+
         /// Output file path
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -259,6 +298,12 @@ enum ResumeCommands {
 
     /// List resume variants for a job
     Variants {
+        /// Job ID
+        job_id: i64,
+    },
+
+    /// Compare resume variants for a job side by side
+    Compare {
         /// Job ID
         job_id: i64,
     },
@@ -1110,10 +1155,17 @@ fn main() -> Result<()> {
                 ResumeCommands::Tailor {
                     job_id,
                     resume,
+                    model,
+                    models,
+                    format,
                     output,
                 } => {
                     let job = db.get_job(job_id)?
                         .ok_or_else(|| anyhow!("Job #{} not found", job_id))?;
+
+                    let job_text = job.raw_text
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("Job #{} has no raw text for tailoring", job_id))?;
 
                     let base_resume = if let Ok(id) = resume.parse::<i64>() {
                         db.get_base_resume(id)?
@@ -1122,23 +1174,73 @@ fn main() -> Result<()> {
                     }
                     .ok_or_else(|| anyhow!("Resume '{}' not found", resume))?;
 
-                    let tailored_content = tailor_resume_for_job(&base_resume, &job)?;
-                    let notes = format!("Tailored for: {}", job.title);
+                    // Gather all resumes: primary first, then others by updated_at DESC
+                    let all_resumes_db = db.list_base_resumes()?;
+                    let mut all_resumes: Vec<(String, String)> = Vec::new();
+                    // Primary resume first
+                    all_resumes.push((base_resume.name.clone(), base_resume.content.clone()));
+                    // Other resumes
+                    for r in &all_resumes_db {
+                        if r.id != base_resume.id {
+                            all_resumes.push((r.name.clone(), r.content.clone()));
+                        }
+                    }
 
-                    let variant_id = db.create_resume_variant(
-                        base_resume.id,
-                        job_id,
-                        &tailored_content,
-                        Some(&notes),
-                    )?;
-
-                    if let Some(out_path) = output {
-                        std::fs::write(&out_path, &tailored_content)
-                            .with_context(|| format!("Failed to write to {}", out_path.display()))?;
-                        println!("Tailored resume saved to: {}", out_path.display());
+                    // Determine which models to use
+                    let model_names: Vec<String> = if let Some(models_str) = &models {
+                        models_str.split(',').map(|s| s.trim().to_string()).collect()
                     } else {
-                        println!("Tailored resume for job #{} (variant ID: {})", job_id, variant_id);
-                        println!("\n--- Tailored Resume ---\n{}", tailored_content);
+                        vec![model.clone()]
+                    };
+
+                    let employer_name = job.employer_name.as_deref();
+
+                    for model_name in &model_names {
+                        let spec = ai::resolve_model(model_name)?;
+                        let provider = ai::create_provider(&spec)?;
+
+                        println!("Generating tailored resume with {} (format: {})...",
+                                 spec.short_name, format);
+
+                        let tailored_content = ai::tailor_resume_full(
+                            provider.as_ref(),
+                            &all_resumes,
+                            job_text,
+                            &job.title,
+                            employer_name,
+                            &format,
+                        )?;
+
+                        let notes = format!("Tailored for: {} (model: {}, format: {})",
+                                           job.title, spec.short_name, format);
+
+                        let variant_id = db.create_resume_variant(
+                            base_resume.id,
+                            job_id,
+                            &tailored_content,
+                            Some(&notes),
+                            Some(&spec.short_name),
+                            Some(&format),
+                        )?;
+
+                        if let Some(out_path) = &output {
+                            // For multi-model, append model name to filename
+                            let final_path = if model_names.len() > 1 {
+                                let stem = out_path.file_stem().unwrap_or_default().to_string_lossy();
+                                let ext = out_path.extension().map(|e| e.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| if format == "latex" { "tex".to_string() } else { "md".to_string() });
+                                out_path.with_file_name(format!("{}-{}.{}", stem, spec.short_name, ext))
+                            } else {
+                                out_path.clone()
+                            };
+                            std::fs::write(&final_path, &tailored_content)
+                                .with_context(|| format!("Failed to write to {}", final_path.display()))?;
+                            println!("Saved to: {}", final_path.display());
+                        } else {
+                            println!("\n--- Tailored Resume (model: {}, variant ID: {}) ---\n{}",
+                                     spec.short_name, variant_id, tailored_content);
+                        }
+                        println!();
                     }
                 }
 
@@ -1147,17 +1249,46 @@ fn main() -> Result<()> {
                     if variants.is_empty() {
                         println!("No resume variants found for job #{}.", job_id);
                     } else {
-                        println!("{:<6} {:<15} {:<20}", "ID", "BASE RESUME", "CREATED");
-                        println!("{}", "-".repeat(43));
+                        println!("{:<6} {:<15} {:<15} {:<10} {:<20}", "ID", "BASE RESUME", "MODEL", "FORMAT", "CREATED");
+                        println!("{}", "-".repeat(68));
                         for variant in variants {
                             let base_resume = db.get_base_resume(variant.base_resume_id)?
                                 .ok_or_else(|| anyhow!("Base resume not found"))?;
                             println!(
-                                "{:<6} {:<15} {:<20}",
+                                "{:<6} {:<15} {:<15} {:<10} {:<20}",
                                 variant.id,
                                 truncate(&base_resume.name, 13),
+                                truncate(variant.source_model.as_deref().unwrap_or("-"), 13),
+                                variant.output_format.as_deref().unwrap_or("-"),
                                 truncate(&variant.created_at, 18)
                             );
+                        }
+                    }
+                }
+
+                ResumeCommands::Compare { job_id } => {
+                    let variants = db.list_resume_variants_for_job(job_id)?;
+                    if variants.is_empty() {
+                        println!("No resume variants found for job #{}.", job_id);
+                    } else {
+                        let job = db.get_job(job_id)?
+                            .ok_or_else(|| anyhow!("Job #{} not found", job_id))?;
+                        println!("Resume variants for job #{}: {}\n", job_id, job.title);
+
+                        for variant in &variants {
+                            let base_resume = db.get_base_resume(variant.base_resume_id)?
+                                .ok_or_else(|| anyhow!("Base resume not found"))?;
+
+                            let model_str = variant.source_model.as_deref().unwrap_or("unknown");
+                            let format_str = variant.output_format.as_deref().unwrap_or("unknown");
+
+                            println!("{}", "=".repeat(60));
+                            println!("Variant #{} | Base: {} | Model: {} | Format: {}",
+                                     variant.id, base_resume.name, model_str, format_str);
+                            println!("Created: {}", variant.created_at);
+                            println!("{}", "=".repeat(60));
+                            println!("{}", variant.content);
+                            println!();
                         }
                     }
                 }
@@ -1322,6 +1453,8 @@ fn main() -> Result<()> {
             println!("  Employers:       {}", stats.employers);
             println!("  Base resumes:    {}", stats.base_resumes);
             println!("  Resume variants: {}", stats.resume_variants);
+            println!("  Job keywords:    {}", stats.job_keywords);
+            println!("  Fit analyses:    {}", stats.fit_analyses);
             println!("\nTotal records: {}", stats.total());
 
             if !confirm {
@@ -1541,7 +1674,7 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Analyze { job_id } => {
+        Commands::Analyze { job_id, model } => {
             db.ensure_initialized()?;
             let job = db.get_job(job_id)?
                 .ok_or_else(|| anyhow!("Job #{} not found", job_id))?;
@@ -1550,95 +1683,145 @@ fn main() -> Result<()> {
                 .as_ref()
                 .ok_or_else(|| anyhow!("Job #{} has no raw text to analyze", job_id))?;
 
-            println!("Analyzing job posting #{}: {}...\n", job_id, job.title);
+            let spec = ai::resolve_model(&model)?;
+            let provider = ai::create_provider(&spec)?;
 
-            let ai_client = ai::AIClient::new()?;
-            let analysis = ai_client.analyze_job(job_text)?;
+            println!("Analyzing job posting #{}: {} (model: {})...\n", job_id, job.title, spec.short_name);
+
+            let analysis = ai::analyze_job(provider.as_ref(), job_text)?;
 
             println!("=== AI Analysis ===\n");
             println!("{}", analysis);
         }
 
-        Commands::Keywords { job_id } => {
+        Commands::Keywords { job_id, model, search } => {
+            db.ensure_initialized()?;
+
+            if let Some(query) = search {
+                // Search mode: find keyword across stored job_keywords
+                let results = db.search_job_keywords(&query)?;
+                if results.is_empty() {
+                    println!("No jobs found with keyword matching '{}'.", query);
+                } else {
+                    println!("Jobs with keyword matching '{}':\n", query);
+                    println!("{:<6} {:<12} {:<40} {:<30}", "JOB", "CATEGORY", "TITLE", "KEYWORD");
+                    println!("{}", "-".repeat(90));
+                    for (job_id, job_title, keyword, category) in &results {
+                        println!(
+                            "{:<6} {:<12} {:<40} {:<30}",
+                            job_id,
+                            category,
+                            truncate(job_title, 38),
+                            truncate(keyword, 28)
+                        );
+                    }
+                    println!("\nTotal: {} matches", results.len());
+                }
+            } else {
+                let job_id = job_id.unwrap();
+                let job = db.get_job(job_id)?
+                    .ok_or_else(|| anyhow!("Job #{} not found", job_id))?;
+
+                let job_text = job.raw_text
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("Job #{} has no raw text to extract keywords from", job_id))?;
+
+                let spec = ai::resolve_model(&model)?;
+                let provider = ai::create_provider(&spec)?;
+
+                println!("Extracting categorized keywords from job #{}: {} (model: {})...\n",
+                         job_id, job.title, spec.short_name);
+
+                let categorized = ai::extract_categorized_keywords(provider.as_ref(), job_text)?;
+
+                // Store in database
+                db.add_job_keywords(job_id, &categorized.mandatory, "mandatory", &spec.short_name)?;
+                db.add_job_keywords(job_id, &categorized.nice_to_have, "nice_to_have", &spec.short_name)?;
+
+                println!("=== Mandatory Skills ===\n");
+                for (i, keyword) in categorized.mandatory.iter().enumerate() {
+                    println!("{}. {}", i + 1, keyword);
+                }
+                println!("\n=== Nice to Have ===\n");
+                for (i, keyword) in categorized.nice_to_have.iter().enumerate() {
+                    println!("{}. {}", i + 1, keyword);
+                }
+                println!("\nTotal: {} mandatory, {} nice-to-have (stored in DB, model: {})",
+                         categorized.mandatory.len(), categorized.nice_to_have.len(), spec.short_name);
+            }
+        }
+
+        Commands::Fit { job_id, resume, model } => {
             db.ensure_initialized()?;
             let job = db.get_job(job_id)?
                 .ok_or_else(|| anyhow!("Job #{} not found", job_id))?;
 
             let job_text = job.raw_text
                 .as_ref()
-                .ok_or_else(|| anyhow!("Job #{} has no raw text to extract keywords from", job_id))?;
+                .ok_or_else(|| anyhow!("Job #{} has no raw text for fit analysis", job_id))?;
 
-            println!("Extracting keywords from job #{}: {}...\n", job_id, job.title);
-
-            let ai_client = ai::AIClient::new()?;
-            let keywords = ai_client.extract_keywords(job_text)?;
-
-            println!("=== Extracted Keywords ===\n");
-            for (i, keyword) in keywords.iter().enumerate() {
-                println!("{}. {}", i + 1, keyword);
+            let base_resume = if let Ok(id) = resume.parse::<i64>() {
+                db.get_base_resume(id)?
+            } else {
+                db.get_base_resume_by_name(&resume)?
             }
-            println!("\nTotal: {} keywords", keywords.len());
+            .ok_or_else(|| anyhow!("Resume '{}' not found", resume))?;
+
+            let spec = ai::resolve_model(&model)?;
+            let provider = ai::create_provider(&spec)?;
+
+            println!("Analyzing fit for job #{}: {} (model: {})...\n", job_id, job.title, spec.short_name);
+
+            let fit = ai::analyze_fit(provider.as_ref(), &base_resume.content, job_text, &job.title)?;
+
+            // Store in database
+            db.save_fit_analysis(
+                job_id,
+                base_resume.id,
+                &spec.short_name,
+                fit.fit_score,
+                &fit.strong_matches,
+                &fit.gaps,
+                &fit.stretch_areas,
+                &fit.narrative,
+            )?;
+
+            println!("=== Fit Analysis ===\n");
+            println!("Fit Score: {:.0}/100\n", fit.fit_score);
+
+            if !fit.strong_matches.is_empty() {
+                println!("Strong Matches:");
+                for item in &fit.strong_matches {
+                    println!("  + {}", item);
+                }
+                println!();
+            }
+
+            if !fit.gaps.is_empty() {
+                println!("Gaps:");
+                for item in &fit.gaps {
+                    println!("  - {}", item);
+                }
+                println!();
+            }
+
+            if !fit.stretch_areas.is_empty() {
+                println!("Stretch Areas:");
+                for item in &fit.stretch_areas {
+                    println!("  ~ {}", item);
+                }
+                println!();
+            }
+
+            if !fit.narrative.is_empty() {
+                println!("Narrative:\n{}", fit.narrative);
+            }
+
+            println!("\n(Stored in DB, model: {})", spec.short_name);
         }
     }
 
     Ok(())
-}
-
-fn tailor_resume_for_job(base_resume: &BaseResume, job: &Job) -> Result<String> {
-    let mut tailored = String::new();
-
-    // Header section
-    tailored.push_str(&format!("# Resume - Tailored for: {}\n\n", job.title));
-
-    if let Some(employer) = &job.employer_name {
-        tailored.push_str(&format!("**Position**: {} at {}\n\n", job.title, employer));
-    } else {
-        tailored.push_str(&format!("**Position**: {}\n\n", job.title));
-    }
-
-    if job.pay_min.is_some() || job.pay_max.is_some() {
-        let pay_range = match (job.pay_min, job.pay_max) {
-            (Some(min), Some(max)) => format!("${} - ${}", min, max),
-            (Some(min), None) => format!("${}+", min),
-            (None, Some(max)) => format!("up to ${}", max),
-            (None, None) => "Not specified".to_string(),
-        };
-        tailored.push_str(&format!("**Compensation**: {}\n\n", pay_range));
-    }
-
-    tailored.push_str("---\n\n");
-
-    // Try to get AI suggestions if job has raw text and API key is available
-    if let Some(job_text) = &job.raw_text {
-        match ai::AIClient::new() {
-            Ok(ai_client) => {
-                println!("Generating AI-powered tailoring suggestions...");
-                match ai_client.tailor_resume(&base_resume.content, job_text, &job.title) {
-                    Ok(suggestions) => {
-                        tailored.push_str("## AI Tailoring Suggestions\n\n");
-                        tailored.push_str(&suggestions);
-                        tailored.push_str("\n\n---\n\n");
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: Failed to generate AI suggestions: {}", e);
-                    }
-                }
-            }
-            Err(_) => {
-                // API key not available, skip AI suggestions
-            }
-        }
-    }
-
-    // Original resume content
-    tailored.push_str("## Base Resume\n\n");
-    tailored.push_str(&base_resume.content);
-
-    tailored.push_str("\n\n---\n");
-    tailored.push_str(&format!("\n*Tailored from base resume: {}*\n", base_resume.name));
-    tailored.push_str(&format!("*Generated: {}*\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
-
-    Ok(tailored)
 }
 
 fn truncate(s: &str, max: usize) -> String {

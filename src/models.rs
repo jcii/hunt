@@ -82,6 +82,33 @@ pub struct ResumeVariant {
     pub job_id: i64,
     pub content: String,
     pub tailoring_notes: Option<String>,
+    pub source_model: Option<String>,
+    pub output_format: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct JobKeyword {
+    pub id: i64,
+    pub job_id: i64,
+    pub keyword: String,
+    pub category: String, // "mandatory" or "nice_to_have"
+    pub source_model: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FitAnalysis {
+    pub id: i64,
+    pub job_id: i64,
+    pub base_resume_id: i64,
+    pub source_model: String,
+    pub fit_score: f64,
+    pub strong_matches: Option<String>,
+    pub gaps: Option<String>,
+    pub stretch_areas: Option<String>,
+    pub narrative: String,
     pub created_at: String,
 }
 
