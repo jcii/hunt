@@ -14,6 +14,7 @@ pub trait AIProvider {
 pub enum ProviderKind {
     Anthropic,
     OpenAI,
+    ClaudeCode,
 }
 
 #[derive(Debug, Clone)]
@@ -25,21 +26,39 @@ pub struct ModelSpec {
 
 pub fn resolve_model(name: &str) -> Result<ModelSpec> {
     match name {
+        // Claude Code provider (uses `claude` CLI — no API key needed)
         "claude-sonnet" | "sonnet" => Ok(ModelSpec {
-            provider: ProviderKind::Anthropic,
+            provider: ProviderKind::ClaudeCode,
             model_id: "claude-sonnet-4-5-20250929".to_string(),
             short_name: "claude-sonnet".to_string(),
         }),
         "claude-opus" | "opus" => Ok(ModelSpec {
-            provider: ProviderKind::Anthropic,
+            provider: ProviderKind::ClaudeCode,
             model_id: "claude-opus-4-6".to_string(),
             short_name: "claude-opus".to_string(),
         }),
         "claude-haiku" | "haiku" => Ok(ModelSpec {
-            provider: ProviderKind::Anthropic,
+            provider: ProviderKind::ClaudeCode,
             model_id: "claude-haiku-4-5-20251001".to_string(),
             short_name: "claude-haiku".to_string(),
         }),
+        // Direct Anthropic API (requires ANTHROPIC_API_KEY)
+        "api-sonnet" => Ok(ModelSpec {
+            provider: ProviderKind::Anthropic,
+            model_id: "claude-sonnet-4-5-20250929".to_string(),
+            short_name: "api-sonnet".to_string(),
+        }),
+        "api-opus" => Ok(ModelSpec {
+            provider: ProviderKind::Anthropic,
+            model_id: "claude-opus-4-6".to_string(),
+            short_name: "api-opus".to_string(),
+        }),
+        "api-haiku" => Ok(ModelSpec {
+            provider: ProviderKind::Anthropic,
+            model_id: "claude-haiku-4-5-20251001".to_string(),
+            short_name: "api-haiku".to_string(),
+        }),
+        // OpenAI (requires OPENAI_API_KEY)
         "gpt-5.2" | "gpt5" => Ok(ModelSpec {
             provider: ProviderKind::OpenAI,
             model_id: "gpt-5.2".to_string(),
@@ -61,7 +80,8 @@ pub fn resolve_model(name: &str) -> Result<ModelSpec> {
             short_name: "o3".to_string(),
         }),
         _ => Err(anyhow!(
-            "Unknown model '{}'. Available: claude-sonnet, claude-opus, claude-haiku, gpt-5.2, gpt-5.2-pro, gpt-4o, o3",
+            "Unknown model '{}'. Available: claude-sonnet (default), claude-opus, claude-haiku, \
+             api-sonnet, api-opus, api-haiku, gpt-5.2, gpt-5.2-pro, gpt-4o, o3",
             name
         )),
     }
@@ -69,6 +89,10 @@ pub fn resolve_model(name: &str) -> Result<ModelSpec> {
 
 pub fn create_provider(spec: &ModelSpec) -> Result<Box<dyn AIProvider>> {
     match spec.provider {
+        ProviderKind::ClaudeCode => {
+            let provider = ClaudeCodeProvider::new(spec.model_id.clone())?;
+            Ok(Box::new(provider))
+        }
         ProviderKind::Anthropic => {
             let provider = AnthropicProvider::new(spec.model_id.clone())?;
             Ok(Box::new(provider))
@@ -166,6 +190,56 @@ impl AIProvider for AnthropicProvider {
             .first()
             .map(|block| block.text.clone())
             .ok_or_else(|| anyhow!("No content in Anthropic API response"))
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model_id
+    }
+}
+
+// --- Claude Code provider (shells out to `claude` CLI) ---
+
+#[derive(Debug)]
+pub struct ClaudeCodeProvider {
+    model_id: String,
+}
+
+impl ClaudeCodeProvider {
+    pub fn new(model_id: String) -> Result<Self> {
+        // Verify claude CLI is available
+        std::process::Command::new("claude")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .context("'claude' CLI not found. Install Claude Code or use api-sonnet/gpt-5.2 instead.")?;
+        Ok(Self { model_id })
+    }
+}
+
+impl AIProvider for ClaudeCodeProvider {
+    fn complete(&self, prompt: &str, _max_tokens: u32) -> Result<String> {
+        let output = std::process::Command::new("claude")
+            .arg("-p")
+            .arg(prompt)
+            .arg("--model")
+            .arg(&self.model_id)
+            .output()
+            .context("Failed to run 'claude' CLI")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("claude CLI failed: {}", stderr));
+        }
+
+        let response = String::from_utf8(output.stdout)
+            .context("Invalid UTF-8 in claude CLI output")?;
+
+        if response.trim().is_empty() {
+            return Err(anyhow!("Empty response from claude CLI"));
+        }
+
+        Ok(response)
     }
 
     fn model_name(&self) -> &str {
@@ -503,18 +577,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_resolve_model_anthropic() {
+    fn test_resolve_model_claude_code() {
         let spec = resolve_model("claude-sonnet").unwrap();
         assert_eq!(spec.model_id, "claude-sonnet-4-5-20250929");
-        assert!(matches!(spec.provider, ProviderKind::Anthropic));
+        assert!(matches!(spec.provider, ProviderKind::ClaudeCode));
 
         let spec = resolve_model("sonnet").unwrap();
         assert_eq!(spec.short_name, "claude-sonnet");
 
         let spec = resolve_model("opus").unwrap();
         assert_eq!(spec.model_id, "claude-opus-4-6");
+        assert!(matches!(spec.provider, ProviderKind::ClaudeCode));
 
         let spec = resolve_model("haiku").unwrap();
+        assert!(matches!(spec.provider, ProviderKind::ClaudeCode));
+    }
+
+    #[test]
+    fn test_resolve_model_anthropic_api() {
+        let spec = resolve_model("api-sonnet").unwrap();
+        assert_eq!(spec.model_id, "claude-sonnet-4-5-20250929");
+        assert!(matches!(spec.provider, ProviderKind::Anthropic));
+
+        let spec = resolve_model("api-opus").unwrap();
         assert!(matches!(spec.provider, ProviderKind::Anthropic));
     }
 
