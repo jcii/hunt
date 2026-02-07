@@ -94,6 +94,7 @@ impl Database {
                 pay_max INTEGER,
                 job_code TEXT,
                 raw_text TEXT,
+                fetched_at TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
@@ -222,6 +223,18 @@ impl Database {
             )?;
         }
 
+        if !job_columns.contains(&"fetched_at".to_string()) {
+            self.conn.execute(
+                "ALTER TABLE jobs ADD COLUMN fetched_at TEXT",
+                [],
+            )?;
+            // Backfill: jobs that already have descriptions were already fetched
+            self.conn.execute(
+                "UPDATE jobs SET fetched_at = updated_at WHERE raw_text IS NOT NULL",
+                [],
+            )?;
+        }
+
         Ok(())
     }
 
@@ -236,6 +249,8 @@ impl Database {
                 "Database not initialized. Run 'hunt init' first."
             ));
         }
+        // Run migrations in case schema has been updated
+        self.migrate()?;
         Ok(())
     }
 
@@ -501,7 +516,7 @@ impl Database {
     pub fn list_jobs(&self, status: Option<&str>, employer: Option<&str>) -> Result<Vec<Job>> {
         let mut sql = String::from(
             "SELECT j.id, j.employer_id, e.name, j.title, j.url, j.source, j.status,
-                    j.pay_min, j.pay_max, j.job_code, j.raw_text, j.created_at, j.updated_at
+                    j.pay_min, j.pay_max, j.job_code, j.raw_text, j.fetched_at, j.created_at, j.updated_at
              FROM jobs j
              LEFT JOIN employers e ON j.employer_id = e.id
              WHERE 1=1",
@@ -537,7 +552,7 @@ impl Database {
     pub fn get_job(&self, id: i64) -> Result<Option<Job>> {
         let result = self.conn.query_row(
             "SELECT j.id, j.employer_id, e.name, j.title, j.url, j.source, j.status,
-                    j.pay_min, j.pay_max, j.job_code, j.raw_text, j.created_at, j.updated_at
+                    j.pay_min, j.pay_max, j.job_code, j.raw_text, j.fetched_at, j.created_at, j.updated_at
              FROM jobs j
              LEFT JOIN employers e ON j.employer_id = e.id
              WHERE j.id = ?1",
@@ -551,17 +566,17 @@ impl Database {
         }
     }
 
-    pub fn get_jobs_without_descriptions(&self, limit: Option<usize>, force: bool) -> Result<Vec<Job>> {
+    pub fn get_jobs_to_fetch(&self, limit: Option<usize>, force: bool) -> Result<Vec<Job>> {
         let where_clause = if force {
             "j.url IS NOT NULL"
         } else {
-            "j.raw_text IS NULL AND j.url IS NOT NULL"
+            "j.fetched_at IS NULL AND j.url IS NOT NULL"
         };
 
         let query = if let Some(lim) = limit {
             format!(
                 "SELECT j.id, j.employer_id, e.name, j.title, j.url, j.source, j.status,
-                        j.pay_min, j.pay_max, j.job_code, j.raw_text, j.created_at, j.updated_at
+                        j.pay_min, j.pay_max, j.job_code, j.raw_text, j.fetched_at, j.created_at, j.updated_at
                  FROM jobs j
                  LEFT JOIN employers e ON j.employer_id = e.id
                  WHERE {}
@@ -572,7 +587,7 @@ impl Database {
         } else {
             format!(
                 "SELECT j.id, j.employer_id, e.name, j.title, j.url, j.source, j.status,
-                        j.pay_min, j.pay_max, j.job_code, j.raw_text, j.created_at, j.updated_at
+                        j.pay_min, j.pay_max, j.job_code, j.raw_text, j.fetched_at, j.created_at, j.updated_at
                  FROM jobs j
                  LEFT JOIN employers e ON j.employer_id = e.id
                  WHERE {}
@@ -621,8 +636,9 @@ impl Database {
             pay_max: row.get(8)?,
             job_code: row.get(9)?,
             raw_text: row.get(10)?,
-            created_at: row.get(11)?,
-            updated_at: row.get(12)?,
+            fetched_at: row.get(11)?,
+            created_at: row.get(12)?,
+            updated_at: row.get(13)?,
         })
     }
 
@@ -860,7 +876,7 @@ impl Database {
     pub fn update_job_description(&self, job_id: i64, description: &str, pay_min: Option<i64>, pay_max: Option<i64>) -> Result<()> {
         self.conn.execute(
             "UPDATE jobs
-             SET raw_text = ?1, pay_min = ?2, pay_max = ?3, updated_at = datetime('now')
+             SET raw_text = ?1, pay_min = ?2, pay_max = ?3, fetched_at = datetime('now'), updated_at = datetime('now')
              WHERE id = ?4",
             params![description, pay_min, pay_max, job_id],
         )?;

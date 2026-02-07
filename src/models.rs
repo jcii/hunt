@@ -50,6 +50,7 @@ pub struct Job {
     pub pay_max: Option<i64>,
     pub job_code: Option<String>, // Job code/number/requisition ID for deduplication
     pub raw_text: Option<String>,
+    pub fetched_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

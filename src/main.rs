@@ -1384,13 +1384,13 @@ fn main() -> Result<()> {
 
             if all {
                 // Fetch all jobs (with or without descriptions based on --force)
-                let jobs = db.get_jobs_without_descriptions(limit, force)?;
+                let jobs = db.get_jobs_to_fetch(limit, force)?;
 
                 if jobs.is_empty() {
                     if force {
                         println!("No jobs found!");
                     } else {
-                        println!("No jobs without descriptions found!");
+                        println!("All jobs have been fetched. Use --force to re-fetch.");
                     }
                     return Ok(());
                 }
@@ -1399,7 +1399,7 @@ fn main() -> Result<()> {
                 if force {
                     println!("Found {} jobs to fetch (--force: re-fetching all)", total);
                 } else {
-                    println!("Found {} jobs without descriptions", total);
+                    println!("Found {} unfetched jobs", total);
                 }
 
                 // Confirmation prompt for large batches
