@@ -7,6 +7,7 @@ pub struct JobDescription {
     pub text: String,
     pub pay_min: Option<i64>,
     pub pay_max: Option<i64>,
+    pub no_longer_accepting: bool,
 }
 
 pub struct JobFetcher {
@@ -81,6 +82,20 @@ impl JobFetcher {
             println!("✓ Authenticated");
         }
 
+        // Check if job is no longer accepting applications
+        let no_longer_accepting = if let Ok(body) = self.driver.find(By::Tag("body")).await {
+            if let Ok(text) = body.text().await {
+                Self::detect_no_longer_accepting(&text)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if no_longer_accepting {
+            println!("⚠ Job is no longer accepting applications");
+        }
+
         // Try to find and click "Show more" button
         println!("Looking for 'Show more' button...");
         let show_more_selectors = vec![
@@ -143,6 +158,7 @@ impl JobFetcher {
                                 text: cleaned,
                                 pay_min,
                                 pay_max,
+                                no_longer_accepting,
                             });
                         }
                     }
@@ -165,6 +181,7 @@ impl JobFetcher {
                         text: cleaned,
                         pay_min,
                         pay_max,
+                        no_longer_accepting,
                     });
                 }
             }
@@ -184,12 +201,29 @@ impl JobFetcher {
                         text: cleaned,
                         pay_min,
                         pay_max,
+                        no_longer_accepting,
                     });
                 }
             }
         }
 
         Err(anyhow!("Could not extract any content from page"))
+    }
+
+    fn detect_no_longer_accepting(text: &str) -> bool {
+        let lower = text.to_lowercase();
+        let phrases = [
+            "no longer accepting applications",
+            "this job is no longer available",
+            "this job has been closed",
+            "this position has been filled",
+            "this job has expired",
+            "job no longer available",
+            "posting has been removed",
+            "position is no longer available",
+            "application window has closed",
+        ];
+        phrases.iter().any(|phrase| lower.contains(phrase))
     }
 
     fn parse_pay_range(text: &str) -> (Option<i64>, Option<i64>) {

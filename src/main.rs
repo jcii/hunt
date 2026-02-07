@@ -1421,6 +1421,7 @@ fn main() -> Result<()> {
                 let start_time = std::time::Instant::now();
                 let mut success_count = 0;
                 let mut fail_count = 0;
+                let mut closed_count = 0;
                 let mut failed_jobs = Vec::new();
 
                 // Fetch each job
@@ -1438,6 +1439,11 @@ fn main() -> Result<()> {
                                 match db.update_job_description(job.id, &job_desc.text,
                                                                job_desc.pay_min, job_desc.pay_max) {
                                     Ok(_) => {
+                                        if job_desc.no_longer_accepting {
+                                            let _ = db.update_job_status(job.id, "closed");
+                                            println!("⚠ No longer accepting applications — marked as closed");
+                                            closed_count += 1;
+                                        }
                                         let pay_info = match (job_desc.pay_min, job_desc.pay_max) {
                                             (Some(min), Some(max)) => format!(" | Pay: ${}-${}", min/1000, max/1000),
                                             (Some(min), None) => format!(" | Pay: ${}K+", min/1000),
@@ -1478,6 +1484,9 @@ fn main() -> Result<()> {
                 println!("\n═══════════════════════════════════════════");
                 println!("Summary:");
                 println!("✓ Successfully fetched: {}/{}", success_count, total);
+                if closed_count > 0 {
+                    println!("⚠ Closed (no longer accepting): {}", closed_count);
+                }
                 if fail_count > 0 {
                     println!("✗ Failed: {}/{}", fail_count, total);
                     if !failed_jobs.is_empty() {
@@ -1507,6 +1516,11 @@ fn main() -> Result<()> {
 
                     // Update job with description and pay info
                     db.update_job_description(job_id, &job_desc.text, job_desc.pay_min, job_desc.pay_max)?;
+
+                    if job_desc.no_longer_accepting {
+                        db.update_job_status(job_id, "closed")?;
+                        println!("⚠ Job #{} is no longer accepting applications — marked as closed", job_id);
+                    }
 
                     let pay_info = match (job_desc.pay_min, job_desc.pay_max) {
                         (Some(min), Some(max)) => format!(" | Pay: ${}-${}", min, max),

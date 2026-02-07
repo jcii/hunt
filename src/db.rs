@@ -874,6 +874,14 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_job_status(&self, job_id: i64, status: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE jobs SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
+            params![status, job_id],
+        )?;
+        Ok(())
+    }
+
     // --- Base Resume operations ---
 
     pub fn create_base_resume(
