@@ -93,8 +93,19 @@ pub struct JobKeyword {
     pub id: i64,
     pub job_id: i64,
     pub keyword: String,
-    pub category: String, // "mandatory" or "nice_to_have"
+    pub domain: String, // "tech", "discipline", "cloud", "soft_skill"
+    pub weight: i32,    // 1-3 (3 = hard requirement, 1 = mentioned once)
     pub source_model: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct JobKeywordProfile {
+    pub id: i64,
+    pub job_id: i64,
+    pub source_model: String,
+    pub profile: String,
     pub created_at: String,
 }
 

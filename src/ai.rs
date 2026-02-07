@@ -405,51 +405,94 @@ pub fn extract_keywords(provider: &dyn AIProvider, job_text: &str) -> Result<Vec
     Ok(keywords)
 }
 
-pub struct CategorizedKeywords {
-    pub mandatory: Vec<String>,
-    pub nice_to_have: Vec<String>,
+pub struct DomainKeywords {
+    pub tech: Vec<(String, i32)>,
+    pub discipline: Vec<(String, i32)>,
+    pub cloud: Vec<(String, i32)>,
+    pub soft_skill: Vec<(String, i32)>,
+    pub profile: String,
 }
 
-pub fn extract_categorized_keywords(
+pub fn extract_domain_keywords(
     provider: &dyn AIProvider,
     job_text: &str,
-) -> Result<CategorizedKeywords> {
+) -> Result<DomainKeywords> {
     let prompt = format!(
-        "Analyze this job posting and extract technical skills, technologies, and requirements.\n\
-        Categorize them as MANDATORY (explicitly required, must-have) or NICE_TO_HAVE (preferred, bonus, nice to have).\n\n\
+        "Analyze this job posting and extract keywords into four domains. \
+        For each keyword, assign a weight from 1-3:\n\
+        - 3 = explicitly required / hard requirement\n\
+        - 2 = clearly important / emphasized\n\
+        - 1 = mentioned once / nice to have\n\n\
         Return EXACTLY in this format with no other text:\n\
-        MANDATORY: skill1, skill2, skill3\n\
-        NICE_TO_HAVE: skill1, skill2, skill3\n\n\
+        TECH: keyword1/3, keyword2/2, keyword3/1\n\
+        DISCIPLINE: keyword1/3, keyword2/2\n\
+        CLOUD: keyword1/3, keyword2/1\n\
+        SOFT_SKILL: keyword1/2, keyword2/1\n\
+        PROFILE: A 2-3 sentence summary of what this role emphasizes.\n\n\
+        Domain guidelines:\n\
+        - TECH: programming languages, frameworks, databases, tools, protocols\n\
+        - DISCIPLINE: methodologies, practices, role types (DevOps, SRE, Agile, CI/CD)\n\
+        - CLOUD: cloud providers, cloud-specific services (AWS, GCP, Azure, S3, Lambda)\n\
+        - SOFT_SKILL: leadership, communication, mentoring, collaboration\n\n\
         Job posting:\n{}",
         job_text
     );
 
     let response = provider.complete(&prompt, 4096)?;
 
-    let mut mandatory = Vec::new();
-    let mut nice_to_have = Vec::new();
+    let mut tech = Vec::new();
+    let mut discipline = Vec::new();
+    let mut cloud = Vec::new();
+    let mut soft_skill = Vec::new();
+    let mut profile = String::new();
 
     for line in response.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("MANDATORY:") {
-            mandatory = rest
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-        } else if let Some(rest) = line.strip_prefix("NICE_TO_HAVE:") {
-            nice_to_have = rest
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+        if let Some(rest) = line.strip_prefix("TECH:") {
+            tech = parse_weighted_keywords(rest);
+        } else if let Some(rest) = line.strip_prefix("DISCIPLINE:") {
+            discipline = parse_weighted_keywords(rest);
+        } else if let Some(rest) = line.strip_prefix("CLOUD:") {
+            cloud = parse_weighted_keywords(rest);
+        } else if let Some(rest) = line.strip_prefix("SOFT_SKILL:") {
+            soft_skill = parse_weighted_keywords(rest);
+        } else if let Some(rest) = line.strip_prefix("PROFILE:") {
+            profile = rest.trim().to_string();
         }
     }
 
-    Ok(CategorizedKeywords {
-        mandatory,
-        nice_to_have,
+    Ok(DomainKeywords {
+        tech,
+        discipline,
+        cloud,
+        soft_skill,
+        profile,
     })
+}
+
+fn parse_weighted_keywords(input: &str) -> Vec<(String, i32)> {
+    input
+        .split(',')
+        .filter_map(|s| {
+            let s = s.trim();
+            if s.is_empty() {
+                return None;
+            }
+            if let Some(slash_pos) = s.rfind('/') {
+                let keyword = s[..slash_pos].trim().to_string();
+                let weight = s[slash_pos + 1..].trim().parse::<i32>().unwrap_or(2);
+                let weight = weight.clamp(1, 3);
+                if keyword.is_empty() {
+                    None
+                } else {
+                    Some((keyword, weight))
+                }
+            } else {
+                // No weight specified, default to 2
+                Some((s.to_string(), 2))
+            }
+        })
+        .collect()
 }
 
 pub struct FitResult {

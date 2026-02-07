@@ -173,6 +173,10 @@ enum Commands {
         /// Search for a keyword across all jobs
         #[arg(short, long)]
         search: Option<String>,
+
+        /// Show stored keywords without re-running AI
+        #[arg(long)]
+        show: bool,
     },
 
     /// Analyze resume fit against a job posting
@@ -686,6 +690,44 @@ fn cleanup_duplicates(db: &Database, dry_run: bool) -> Result<usize> {
     }
 
     Ok(duplicates.len())
+}
+
+fn display_domain_keywords(keywords: &[models::JobKeyword]) {
+    let domains = [
+        ("tech", "TECH"),
+        ("discipline", "DISCIPLINE"),
+        ("cloud", "CLOUD"),
+        ("soft_skill", "SOFT SKILLS"),
+    ];
+
+    for (domain_key, domain_label) in &domains {
+        let domain_keywords: Vec<&models::JobKeyword> = keywords
+            .iter()
+            .filter(|k| k.domain == *domain_key)
+            .collect();
+
+        if domain_keywords.is_empty() {
+            continue;
+        }
+
+        println!("  {}", domain_label);
+        for weight in (1..=3).rev() {
+            let at_weight: Vec<&str> = domain_keywords
+                .iter()
+                .filter(|k| k.weight == weight)
+                .map(|k| k.keyword.as_str())
+                .collect();
+
+            if at_weight.is_empty() {
+                continue;
+            }
+
+            let stars = "*".repeat(weight as usize);
+            let pad = " ".repeat(3 - weight as usize);
+            println!("    {}{} {}", pad, stars, at_weight.join(", "));
+        }
+        println!();
+    }
 }
 
 fn main() -> Result<()> {
@@ -1448,13 +1490,14 @@ fn main() -> Result<()> {
             let stats = db.get_destruction_stats()?;
 
             println!("Database destruction preview:");
-            println!("  Jobs:            {}", stats.jobs);
-            println!("  Job snapshots:   {}", stats.job_snapshots);
-            println!("  Employers:       {}", stats.employers);
-            println!("  Base resumes:    {}", stats.base_resumes);
-            println!("  Resume variants: {}", stats.resume_variants);
-            println!("  Job keywords:    {}", stats.job_keywords);
-            println!("  Fit analyses:    {}", stats.fit_analyses);
+            println!("  Jobs:               {}", stats.jobs);
+            println!("  Job snapshots:      {}", stats.job_snapshots);
+            println!("  Employers:          {}", stats.employers);
+            println!("  Base resumes:       {}", stats.base_resumes);
+            println!("  Resume variants:    {}", stats.resume_variants);
+            println!("  Job keywords:       {}", stats.job_keywords);
+            println!("  Keyword profiles:   {}", stats.job_keyword_profiles);
+            println!("  Fit analyses:       {}", stats.fit_analyses);
             println!("\nTotal records: {}", stats.total());
 
             if !confirm {
@@ -1694,7 +1737,7 @@ fn main() -> Result<()> {
             println!("{}", analysis);
         }
 
-        Commands::Keywords { job_id, model, search } => {
+        Commands::Keywords { job_id, model, search, show } => {
             db.ensure_initialized()?;
 
             if let Some(query) = search {
@@ -1704,20 +1747,49 @@ fn main() -> Result<()> {
                     println!("No jobs found with keyword matching '{}'.", query);
                 } else {
                     println!("Jobs with keyword matching '{}':\n", query);
-                    println!("{:<6} {:<12} {:<40} {:<30}", "JOB", "CATEGORY", "TITLE", "KEYWORD");
-                    println!("{}", "-".repeat(90));
-                    for (job_id, job_title, keyword, category) in &results {
+                    println!("{:<6} {:<14} {:<6} {:<40} {:<30}", "JOB", "DOMAIN", "WT", "TITLE", "KEYWORD");
+                    println!("{}", "-".repeat(98));
+                    for (job_id, job_title, keyword, domain, weight) in &results {
+                        let stars = "*".repeat(*weight as usize);
                         println!(
-                            "{:<6} {:<12} {:<40} {:<30}",
+                            "{:<6} {:<14} {:<6} {:<40} {:<30}",
                             job_id,
-                            category,
+                            domain,
+                            stars,
                             truncate(job_title, 38),
                             truncate(keyword, 28)
                         );
                     }
                     println!("\nTotal: {} matches", results.len());
                 }
+            } else if show {
+                // Show stored keywords without re-running AI
+                let job_id = job_id.unwrap();
+                let job = db.get_job(job_id)?
+                    .ok_or_else(|| anyhow!("Job #{} not found", job_id))?;
+
+                let keywords = db.get_job_keywords(job_id)?;
+                if keywords.is_empty() {
+                    println!("No stored keywords for job #{}. Run 'hunt keywords {}' to extract.", job_id, job_id);
+                    return Ok(());
+                }
+
+                let source_model = &keywords[0].source_model;
+                println!("Keywords for job #{}: {} (model: {})\n",
+                         job_id, job.title, source_model);
+
+                display_domain_keywords(&keywords);
+
+                // Show profile if available
+                if let Some(profile) = db.get_keyword_profile(job_id)? {
+                    println!("  PROFILE");
+                    for line in textwrap::fill(&profile.profile, 72).lines() {
+                        println!("  {}", line);
+                    }
+                    println!();
+                }
             } else {
+                // Extract mode: call AI and store results
                 let job_id = job_id.unwrap();
                 let job = db.get_job(job_id)?
                     .ok_or_else(|| anyhow!("Job #{} not found", job_id))?;
@@ -1729,25 +1801,39 @@ fn main() -> Result<()> {
                 let spec = ai::resolve_model(&model)?;
                 let provider = ai::create_provider(&spec)?;
 
-                println!("Extracting categorized keywords from job #{}: {} (model: {})...\n",
+                println!("Extracting keywords from job #{}: {} (model: {})...\n",
                          job_id, job.title, spec.short_name);
 
-                let categorized = ai::extract_categorized_keywords(provider.as_ref(), job_text)?;
+                let domain_kw = ai::extract_domain_keywords(provider.as_ref(), job_text)?;
 
                 // Store in database
-                db.add_job_keywords(job_id, &categorized.mandatory, "mandatory", &spec.short_name)?;
-                db.add_job_keywords(job_id, &categorized.nice_to_have, "nice_to_have", &spec.short_name)?;
+                db.add_job_keywords(job_id, &domain_kw.tech, "tech", &spec.short_name)?;
+                db.add_job_keywords(job_id, &domain_kw.discipline, "discipline", &spec.short_name)?;
+                db.add_job_keywords(job_id, &domain_kw.cloud, "cloud", &spec.short_name)?;
+                db.add_job_keywords(job_id, &domain_kw.soft_skill, "soft_skill", &spec.short_name)?;
 
-                println!("=== Mandatory Skills ===\n");
-                for (i, keyword) in categorized.mandatory.iter().enumerate() {
-                    println!("{}. {}", i + 1, keyword);
+                if !domain_kw.profile.is_empty() {
+                    db.save_keyword_profile(job_id, &spec.short_name, &domain_kw.profile)?;
                 }
-                println!("\n=== Nice to Have ===\n");
-                for (i, keyword) in categorized.nice_to_have.iter().enumerate() {
-                    println!("{}. {}", i + 1, keyword);
+
+                // Display results
+                let all_keywords = db.get_job_keywords(job_id)?;
+                println!("Keywords for job #{}: {} (model: {})\n",
+                         job_id, job.title, spec.short_name);
+
+                display_domain_keywords(&all_keywords);
+
+                if !domain_kw.profile.is_empty() {
+                    println!("  PROFILE");
+                    for line in textwrap::fill(&domain_kw.profile, 72).lines() {
+                        println!("  {}", line);
+                    }
+                    println!();
                 }
-                println!("\nTotal: {} mandatory, {} nice-to-have (stored in DB, model: {})",
-                         categorized.mandatory.len(), categorized.nice_to_have.len(), spec.short_name);
+
+                let total = domain_kw.tech.len() + domain_kw.discipline.len()
+                    + domain_kw.cloud.len() + domain_kw.soft_skill.len();
+                println!("Total: {} keywords stored (model: {})", total, spec.short_name);
             }
         }
 

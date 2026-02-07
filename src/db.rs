@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
 
-use crate::models::{BaseResume, Employer, FitAnalysis, GlassdoorReview, Job, JobKeyword, ResumeVariant};
+use crate::models::{BaseResume, Employer, FitAnalysis, GlassdoorReview, Job, JobKeyword, JobKeywordProfile, ResumeVariant};
 
 pub struct DestructionStats {
     pub jobs: i64,
@@ -11,13 +11,14 @@ pub struct DestructionStats {
     pub base_resumes: i64,
     pub resume_variants: i64,
     pub job_keywords: i64,
+    pub job_keyword_profiles: i64,
     pub fit_analyses: i64,
 }
 
 impl DestructionStats {
     pub fn total(&self) -> i64 {
         self.jobs + self.job_snapshots + self.employers + self.base_resumes
-            + self.resume_variants + self.job_keywords + self.fit_analyses
+            + self.resume_variants + self.job_keywords + self.job_keyword_profiles + self.fit_analyses
     }
 }
 
@@ -142,7 +143,8 @@ impl Database {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_id INTEGER NOT NULL REFERENCES jobs(id),
                 keyword TEXT NOT NULL,
-                category TEXT NOT NULL CHECK (category IN ('mandatory', 'nice_to_have')),
+                domain TEXT NOT NULL CHECK (domain IN ('tech', 'discipline', 'cloud', 'soft_skill')),
+                weight INTEGER NOT NULL DEFAULT 2 CHECK (weight BETWEEN 1 AND 3),
                 source_model TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
@@ -181,6 +183,15 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_glassdoor_employer ON glassdoor_reviews(employer_id);
             CREATE INDEX IF NOT EXISTS idx_glassdoor_date ON glassdoor_reviews(review_date);
+
+            CREATE TABLE IF NOT EXISTS job_keyword_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL REFERENCES jobs(id),
+                source_model TEXT NOT NULL,
+                profile TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(job_id, source_model)
+            );
             "#,
         )?;
 
@@ -299,20 +310,66 @@ impl Database {
             )?;
         }
 
-        // Create job_keywords table if it doesn't exist
+        // Migrate job_keywords: old schema had `category`, new schema has `domain` + `weight`
+        let jk_columns: Vec<String> = self.conn
+            .prepare("PRAGMA table_info(job_keywords)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if !jk_columns.is_empty() && jk_columns.contains(&"category".to_string()) {
+            // Rename-copy-drop: migrate from category to domain+weight
+            self.conn.execute_batch(
+                r#"
+                ALTER TABLE job_keywords RENAME TO job_keywords_old;
+
+                CREATE TABLE job_keywords (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id INTEGER NOT NULL REFERENCES jobs(id),
+                    keyword TEXT NOT NULL,
+                    domain TEXT NOT NULL CHECK (domain IN ('tech', 'discipline', 'cloud', 'soft_skill')),
+                    weight INTEGER NOT NULL DEFAULT 2 CHECK (weight BETWEEN 1 AND 3),
+                    source_model TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                INSERT INTO job_keywords (id, job_id, keyword, domain, weight, source_model, created_at)
+                    SELECT id, job_id, keyword, 'tech',
+                           CASE WHEN category = 'mandatory' THEN 3 ELSE 1 END,
+                           source_model, created_at
+                    FROM job_keywords_old;
+
+                DROP TABLE job_keywords_old;
+
+                CREATE INDEX IF NOT EXISTS idx_job_keywords_job ON job_keywords(job_id);
+                CREATE INDEX IF NOT EXISTS idx_job_keywords_keyword ON job_keywords(keyword);
+                "#,
+            )?;
+        }
+
+        // Create job_keywords table if it doesn't exist (fresh databases)
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS job_keywords (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_id INTEGER NOT NULL REFERENCES jobs(id),
                 keyword TEXT NOT NULL,
-                category TEXT NOT NULL CHECK (category IN ('mandatory', 'nice_to_have')),
+                domain TEXT NOT NULL CHECK (domain IN ('tech', 'discipline', 'cloud', 'soft_skill')),
+                weight INTEGER NOT NULL DEFAULT 2 CHECK (weight BETWEEN 1 AND 3),
                 source_model TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
             CREATE INDEX IF NOT EXISTS idx_job_keywords_job ON job_keywords(job_id);
             CREATE INDEX IF NOT EXISTS idx_job_keywords_keyword ON job_keywords(keyword);
+
+            CREATE TABLE IF NOT EXISTS job_keyword_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL REFERENCES jobs(id),
+                source_model TEXT NOT NULL,
+                profile TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(job_id, source_model)
+            );
 
             CREATE TABLE IF NOT EXISTS fit_analyses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -753,6 +810,7 @@ impl Database {
         self.conn.execute("DELETE FROM job_snapshots WHERE job_id = ?1", [id])?;
         self.conn.execute("DELETE FROM resume_variants WHERE job_id = ?1", [id])?;
         self.conn.execute("DELETE FROM job_keywords WHERE job_id = ?1", [id])?;
+        self.conn.execute("DELETE FROM job_keyword_profiles WHERE job_id = ?1", [id])?;
         self.conn.execute("DELETE FROM fit_analyses WHERE job_id = ?1", [id])?;
 
         // Delete the job
@@ -1188,34 +1246,33 @@ impl Database {
     pub fn add_job_keywords(
         &self,
         job_id: i64,
-        keywords: &[String],
-        category: &str,
+        keywords: &[(String, i32)],
+        domain: &str,
         source_model: &str,
     ) -> Result<()> {
-        // Remove existing keywords for this job/category/model before inserting
+        // Remove existing keywords for this job/domain/model before inserting
         self.conn.execute(
-            "DELETE FROM job_keywords WHERE job_id = ?1 AND category = ?2 AND source_model = ?3",
-            params![job_id, category, source_model],
+            "DELETE FROM job_keywords WHERE job_id = ?1 AND domain = ?2 AND source_model = ?3",
+            params![job_id, domain, source_model],
         )?;
 
         let mut stmt = self.conn.prepare(
-            "INSERT INTO job_keywords (job_id, keyword, category, source_model)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO job_keywords (job_id, keyword, domain, weight, source_model)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
 
-        for keyword in keywords {
-            stmt.execute(params![job_id, keyword, category, source_model])?;
+        for (keyword, weight) in keywords {
+            stmt.execute(params![job_id, keyword, domain, weight, source_model])?;
         }
 
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn get_job_keywords(&self, job_id: i64) -> Result<Vec<JobKeyword>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, job_id, keyword, category, source_model, created_at
+            "SELECT id, job_id, keyword, domain, weight, source_model, created_at
              FROM job_keywords WHERE job_id = ?1
-             ORDER BY category, keyword",
+             ORDER BY domain, weight DESC, keyword",
         )?;
 
         let rows = stmt.query_map([job_id], |row| {
@@ -1223,9 +1280,10 @@ impl Database {
                 id: row.get(0)?,
                 job_id: row.get(1)?,
                 keyword: row.get(2)?,
-                category: row.get(3)?,
-                source_model: row.get(4)?,
-                created_at: row.get(5)?,
+                domain: row.get(3)?,
+                weight: row.get(4)?,
+                source_model: row.get(5)?,
+                created_at: row.get(6)?,
             })
         })?;
 
@@ -1233,14 +1291,56 @@ impl Database {
             .context("Failed to list job keywords")
     }
 
-    pub fn search_job_keywords(&self, query: &str) -> Result<Vec<(i64, String, String, String)>> {
+    pub fn save_keyword_profile(
+        &self,
+        job_id: i64,
+        source_model: &str,
+        profile: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO job_keyword_profiles (job_id, source_model, profile)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(job_id, source_model) DO UPDATE SET
+                profile = excluded.profile",
+            params![job_id, source_model, profile],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_keyword_profile(
+        &self,
+        job_id: i64,
+    ) -> Result<Option<JobKeywordProfile>> {
+        let result = self.conn.query_row(
+            "SELECT id, job_id, source_model, profile, created_at
+             FROM job_keyword_profiles WHERE job_id = ?1
+             ORDER BY created_at DESC LIMIT 1",
+            [job_id],
+            |row| {
+                Ok(JobKeywordProfile {
+                    id: row.get(0)?,
+                    job_id: row.get(1)?,
+                    source_model: row.get(2)?,
+                    profile: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            },
+        );
+        match result {
+            Ok(profile) => Ok(Some(profile)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn search_job_keywords(&self, query: &str) -> Result<Vec<(i64, String, String, String, i32)>> {
         let pattern = format!("%{}%", query);
         let mut stmt = self.conn.prepare(
-            "SELECT jk.job_id, j.title, jk.keyword, jk.category
+            "SELECT jk.job_id, j.title, jk.keyword, jk.domain, jk.weight
              FROM job_keywords jk
              JOIN jobs j ON jk.job_id = j.id
              WHERE LOWER(jk.keyword) LIKE LOWER(?1)
-             ORDER BY jk.job_id, jk.category, jk.keyword",
+             ORDER BY jk.job_id, jk.domain, jk.weight DESC, jk.keyword",
         )?;
 
         let rows = stmt.query_map([&pattern], |row| {
@@ -1249,6 +1349,7 @@ impl Database {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, i32>(4)?,
             ))
         })?;
 
@@ -1342,6 +1443,9 @@ impl Database {
         let job_keywords: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM job_keywords", [], |row| row.get(0),
         )?;
+        let job_keyword_profiles: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM job_keyword_profiles", [], |row| row.get(0),
+        )?;
         let fit_analyses: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM fit_analyses", [], |row| row.get(0),
         )?;
@@ -1353,12 +1457,14 @@ impl Database {
             base_resumes,
             resume_variants,
             job_keywords,
+            job_keyword_profiles,
             fit_analyses,
         })
     }
 
     pub fn destroy_all_data(&self) -> Result<()> {
         self.conn.execute("DELETE FROM fit_analyses", [])?;
+        self.conn.execute("DELETE FROM job_keyword_profiles", [])?;
         self.conn.execute("DELETE FROM job_keywords", [])?;
         self.conn.execute("DELETE FROM resume_variants", [])?;
         self.conn.execute("DELETE FROM base_resumes", [])?;
