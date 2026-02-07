@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="hunt-logo.svg" width="360" alt="hunt logo" />
+  <img src="hunt-logo.svg" width="480" alt="hunt" />
 </p>
 
-<h1 align="center">hunt</h1>
+<h1 align="center">Hunt for a job, skip the grind.</h1>
 
 <p align="center">
-  <strong>Job search automation — find, track, and analyze opportunities from the terminal.</strong>
+  Find, track, and analyze opportunities from the terminal.
 </p>
 
 <p align="center">
