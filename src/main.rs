@@ -133,6 +133,10 @@ enum Commands {
         #[arg(long)]
         all: bool,
 
+        /// Re-fetch jobs even if they already have descriptions (used with --all)
+        #[arg(long)]
+        force: bool,
+
         /// Maximum number of jobs to fetch (used with --all)
         #[arg(long)]
         limit: Option<usize>,
@@ -1370,20 +1374,28 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Fetch { id, all, limit, delay, headless } => {
+        Commands::Fetch { id, all, force, limit, delay, headless } => {
             db.ensure_initialized()?;
 
             if all {
-                // Fetch all jobs without descriptions
-                let jobs = db.get_jobs_without_descriptions(limit)?;
+                // Fetch all jobs (with or without descriptions based on --force)
+                let jobs = db.get_jobs_without_descriptions(limit, force)?;
 
                 if jobs.is_empty() {
-                    println!("No jobs without descriptions found!");
+                    if force {
+                        println!("No jobs found!");
+                    } else {
+                        println!("No jobs without descriptions found!");
+                    }
                     return Ok(());
                 }
 
                 let total = jobs.len();
-                println!("Found {} jobs without descriptions", total);
+                if force {
+                    println!("Found {} jobs to fetch (--force: re-fetching all)", total);
+                } else {
+                    println!("Found {} jobs without descriptions", total);
+                }
 
                 // Confirmation prompt for large batches
                 if total > 10 {

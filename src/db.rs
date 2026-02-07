@@ -551,26 +551,34 @@ impl Database {
         }
     }
 
-    pub fn get_jobs_without_descriptions(&self, limit: Option<usize>) -> Result<Vec<Job>> {
+    pub fn get_jobs_without_descriptions(&self, limit: Option<usize>, force: bool) -> Result<Vec<Job>> {
+        let where_clause = if force {
+            "j.url IS NOT NULL"
+        } else {
+            "j.raw_text IS NULL AND j.url IS NOT NULL"
+        };
+
         let query = if let Some(lim) = limit {
             format!(
                 "SELECT j.id, j.employer_id, e.name, j.title, j.url, j.source, j.status,
                         j.pay_min, j.pay_max, j.job_code, j.raw_text, j.created_at, j.updated_at
                  FROM jobs j
                  LEFT JOIN employers e ON j.employer_id = e.id
-                 WHERE j.raw_text IS NULL AND j.url IS NOT NULL
+                 WHERE {}
                  ORDER BY j.created_at ASC
                  LIMIT {}",
-                lim
+                where_clause, lim
             )
         } else {
-            "SELECT j.id, j.employer_id, e.name, j.title, j.url, j.source, j.status,
-                    j.pay_min, j.pay_max, j.job_code, j.raw_text, j.created_at, j.updated_at
-             FROM jobs j
-             LEFT JOIN employers e ON j.employer_id = e.id
-             WHERE j.raw_text IS NULL AND j.url IS NOT NULL
-             ORDER BY j.created_at ASC"
-                .to_string()
+            format!(
+                "SELECT j.id, j.employer_id, e.name, j.title, j.url, j.source, j.status,
+                        j.pay_min, j.pay_max, j.job_code, j.raw_text, j.created_at, j.updated_at
+                 FROM jobs j
+                 LEFT JOIN employers e ON j.employer_id = e.id
+                 WHERE {}
+                 ORDER BY j.created_at ASC",
+                where_clause
+            )
         };
 
         let mut stmt = self.conn.prepare(&query)?;
