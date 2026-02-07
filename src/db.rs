@@ -1318,6 +1318,32 @@ impl Database {
         }
     }
 
+    /// Get jobs that have raw_text but no stored keywords (or all with raw_text if force=true)
+    pub fn get_jobs_needing_keywords(&self, force: bool) -> Result<Vec<Job>> {
+        let sql = if force {
+            "SELECT j.id, j.employer_id, e.name, j.title, j.url, j.source, j.status,
+                    j.pay_min, j.pay_max, j.job_code, j.raw_text, j.fetched_at, j.created_at, j.updated_at
+             FROM jobs j
+             LEFT JOIN employers e ON j.employer_id = e.id
+             WHERE j.raw_text IS NOT NULL AND j.raw_text != ''
+             ORDER BY j.id ASC"
+        } else {
+            "SELECT j.id, j.employer_id, e.name, j.title, j.url, j.source, j.status,
+                    j.pay_min, j.pay_max, j.job_code, j.raw_text, j.fetched_at, j.created_at, j.updated_at
+             FROM jobs j
+             LEFT JOIN employers e ON j.employer_id = e.id
+             WHERE j.raw_text IS NOT NULL AND j.raw_text != ''
+               AND j.id NOT IN (SELECT DISTINCT job_id FROM job_keywords)
+             ORDER BY j.id ASC"
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let jobs = stmt
+            .query_map([], Self::row_to_job)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(jobs)
+    }
+
     pub fn save_keyword_profile(
         &self,
         job_id: i64,

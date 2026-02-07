@@ -3,6 +3,7 @@ mod browser;
 mod db;
 mod email;
 mod models;
+mod tui;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
@@ -45,6 +46,10 @@ enum Commands {
     Show {
         /// Job ID
         id: i64,
+
+        /// Show raw job description text even when AI summary exists
+        #[arg(long)]
+        raw: bool,
     },
 
     /// Manage employers
@@ -162,8 +167,8 @@ enum Commands {
 
     /// Extract keywords from a job posting
     Keywords {
-        /// Job ID to extract keywords from (required unless --search is used)
-        #[arg(required_unless_present = "search")]
+        /// Job ID to extract keywords from
+        #[arg(required_unless_present_any = ["search", "all"])]
         job_id: Option<i64>,
 
         /// AI model to use (default: claude-sonnet)
@@ -177,6 +182,14 @@ enum Commands {
         /// Show stored keywords without re-running AI
         #[arg(long)]
         show: bool,
+
+        /// Extract keywords from all jobs with descriptions but no stored keywords
+        #[arg(long)]
+        all: bool,
+
+        /// Re-extract keywords even if they already exist (use with --all)
+        #[arg(long)]
+        force: bool,
     },
 
     /// Analyze resume fit against a job posting
@@ -191,6 +204,17 @@ enum Commands {
         /// AI model to use (default: claude-sonnet)
         #[arg(short, long, default_value = "claude-sonnet")]
         model: String,
+    },
+
+    /// Browse jobs interactively in a TUI
+    Browse {
+        /// Filter by status (new, reviewing, applied, rejected, closed)
+        #[arg(short, long)]
+        status: Option<String>,
+
+        /// Filter by employer
+        #[arg(short, long)]
+        employer: Option<String>,
     },
 }
 
@@ -778,7 +802,7 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Show { id } => {
+        Commands::Show { id, raw } => {
             db.ensure_initialized()?;
             match db.get_job(id)? {
                 Some(job) => {
@@ -801,8 +825,35 @@ fn main() -> Result<()> {
                         (None, None) => {}
                     }
                     println!("Created: {}", job.created_at);
-                    if let Some(raw) = &job.raw_text {
-                        println!("\n--- Raw Text ---\n{}", raw);
+
+                    // Show AI keywords/profile if available
+                    let has_ai = if let Some(model) = db.get_latest_keyword_model(id)? {
+                        let keywords = db.get_job_keywords(id, Some(&model))?;
+                        if !keywords.is_empty() {
+                            println!("\n--- Keywords (model: {}) ---\n", model);
+                            display_domain_keywords(&keywords);
+                            if let Some(profile) = db.get_keyword_profile(id)? {
+                                println!("  PROFILE");
+                                for line in textwrap::fill(&profile.profile, 72).lines() {
+                                    println!("  {}", line);
+                                }
+                                println!();
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    // Show raw text: always if --raw, or if no AI data exists
+                    if raw || !has_ai {
+                        if let Some(text) = &job.raw_text {
+                            println!("--- Raw Text ---\n{}", text);
+                        }
+                    } else if job.raw_text.is_some() {
+                        println!("(Raw text available — use --raw to display)");
                     }
                 }
                 None => {
@@ -1740,7 +1791,7 @@ fn main() -> Result<()> {
             println!("{}", analysis);
         }
 
-        Commands::Keywords { job_id, model, search, show } => {
+        Commands::Keywords { job_id, model, search, show, all, force } => {
             db.ensure_initialized()?;
 
             if let Some(query) = search {
@@ -1765,6 +1816,72 @@ fn main() -> Result<()> {
                     }
                     println!("\nTotal: {} matches", results.len());
                 }
+            } else if all {
+                // Batch mode: extract keywords from all jobs needing them
+                let jobs = db.get_jobs_needing_keywords(force)?;
+
+                if jobs.is_empty() {
+                    if force {
+                        println!("No jobs with descriptions found.");
+                    } else {
+                        println!("All jobs with descriptions already have keywords. Use --force to re-extract.");
+                    }
+                    return Ok(());
+                }
+
+                let spec = ai::resolve_model(&model)?;
+                let provider = ai::create_provider(&spec)?;
+
+                let total = jobs.len();
+                if force {
+                    println!("Extracting keywords from {} jobs (--force: re-extracting all, model: {})\n",
+                             total, spec.short_name);
+                } else {
+                    println!("Extracting keywords from {} jobs without keywords (model: {})\n",
+                             total, spec.short_name);
+                }
+
+                let mut success_count = 0;
+                let mut fail_count = 0;
+
+                for (i, job) in jobs.iter().enumerate() {
+                    let job_num = i + 1;
+                    let employer = job.employer_name.as_deref().unwrap_or("?");
+                    print!("[{}/{}] #{} {} at {} ... ",
+                           job_num, total, job.id,
+                           truncate(&job.title, 40), truncate(employer, 25));
+
+                    let job_text = match &job.raw_text {
+                        Some(text) => text,
+                        None => {
+                            println!("SKIP (no text)");
+                            continue;
+                        }
+                    };
+
+                    match ai::extract_domain_keywords(provider.as_ref(), job_text) {
+                        Ok(domain_kw) => {
+                            db.add_job_keywords(job.id, &domain_kw.tech, "tech", &spec.short_name)?;
+                            db.add_job_keywords(job.id, &domain_kw.discipline, "discipline", &spec.short_name)?;
+                            db.add_job_keywords(job.id, &domain_kw.cloud, "cloud", &spec.short_name)?;
+                            db.add_job_keywords(job.id, &domain_kw.soft_skill, "soft_skill", &spec.short_name)?;
+                            if !domain_kw.profile.is_empty() {
+                                db.save_keyword_profile(job.id, &spec.short_name, &domain_kw.profile)?;
+                            }
+                            let kw_count = domain_kw.tech.len() + domain_kw.discipline.len()
+                                + domain_kw.cloud.len() + domain_kw.soft_skill.len();
+                            println!("{} keywords", kw_count);
+                            success_count += 1;
+                        }
+                        Err(e) => {
+                            println!("FAILED: {}", e);
+                            fail_count += 1;
+                        }
+                    }
+                }
+
+                println!("\nDone: {} succeeded, {} failed out of {} jobs",
+                         success_count, fail_count, total);
             } else if show {
                 // Show stored keywords without re-running AI
                 let job_id = job_id.unwrap();
@@ -1911,6 +2028,11 @@ fn main() -> Result<()> {
             }
 
             println!("\n(Stored in DB, model: {})", spec.short_name);
+        }
+
+        Commands::Browse { status, employer } => {
+            db.ensure_initialized()?;
+            tui::run_browse(&db, status.as_deref(), employer.as_deref())?;
         }
     }
 
