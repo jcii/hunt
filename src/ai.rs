@@ -290,7 +290,7 @@ struct OpenAIMessage {
 #[derive(Debug, Serialize)]
 struct OpenAIRequest {
     model: String,
-    max_tokens: u32,
+    max_completion_tokens: u32,
     messages: Vec<OpenAIMessage>,
 }
 
@@ -329,7 +329,7 @@ impl AIProvider for OpenAIProvider {
     fn complete(&self, prompt: &str, max_tokens: u32) -> Result<String> {
         let request = OpenAIRequest {
             model: self.model_id.clone(),
-            max_tokens,
+            max_completion_tokens: max_tokens,
             messages: vec![OpenAIMessage {
                 role: "user".to_string(),
                 content: prompt.to_string(),
