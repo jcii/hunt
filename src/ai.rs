@@ -219,17 +219,40 @@ impl ClaudeCodeProvider {
 
 impl AIProvider for ClaudeCodeProvider {
     fn complete(&self, prompt: &str, _max_tokens: u32) -> Result<String> {
-        let output = std::process::Command::new("claude")
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("claude")
             .arg("-p")
-            .arg(prompt)
+            .arg("-")
             .arg("--model")
             .arg(&self.model_id)
-            .output()
-            .context("Failed to run 'claude' CLI")?;
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("Failed to start 'claude' CLI")?;
+
+        // Write prompt to stdin
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(prompt.as_bytes())
+                .context("Failed to write prompt to claude CLI stdin")?;
+        }
+
+        let output = child.wait_with_output()
+            .context("Failed to wait for claude CLI")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("claude CLI failed: {}", stderr));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let detail = if !stderr.is_empty() {
+                stderr.to_string()
+            } else if !stdout.is_empty() {
+                stdout.to_string()
+            } else {
+                format!("exit code: {}", output.status)
+            };
+            return Err(anyhow!("claude CLI failed: {}", detail));
         }
 
         let response = String::from_utf8(output.stdout)
@@ -629,45 +652,39 @@ mod tests {
     }
 
     #[test]
-    fn test_anthropic_provider_requires_api_key() {
+    fn test_anthropic_provider_api_key() {
+        // Test both presence and absence in one test to avoid parallel env var races
         let original = env::var("ANTHROPIC_API_KEY").ok();
-        unsafe { env::remove_var("ANTHROPIC_API_KEY"); }
 
-        let result = AnthropicProvider::new("claude-sonnet-4-5-20250929".to_string());
-
-        if let Some(val) = original {
-            unsafe { env::set_var("ANTHROPIC_API_KEY", val); }
-        }
-
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("ANTHROPIC_API_KEY"));
-    }
-
-    #[test]
-    fn test_anthropic_provider_with_api_key() {
+        // With key set
         unsafe { env::set_var("ANTHROPIC_API_KEY", "test-key"); }
-
         let result = AnthropicProvider::new("claude-sonnet-4-5-20250929".to_string());
         assert!(result.is_ok());
         assert_eq!(result.unwrap().model_name(), "claude-sonnet-4-5-20250929");
 
+        // Without key
         unsafe { env::remove_var("ANTHROPIC_API_KEY"); }
+        let result = AnthropicProvider::new("claude-sonnet-4-5-20250929".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ANTHROPIC_API_KEY"));
+
+        // Restore
+        if let Some(val) = original {
+            unsafe { env::set_var("ANTHROPIC_API_KEY", val); }
+        }
     }
 
     #[test]
-    fn test_openai_provider_requires_api_key() {
+    fn test_openai_provider_api_key() {
         let original = env::var("OPENAI_API_KEY").ok();
-        unsafe { env::remove_var("OPENAI_API_KEY"); }
 
+        unsafe { env::remove_var("OPENAI_API_KEY"); }
         let result = OpenAIProvider::new("gpt-4o".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("OPENAI_API_KEY"));
 
         if let Some(val) = original {
             unsafe { env::set_var("OPENAI_API_KEY", val); }
         }
-
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("OPENAI_API_KEY"));
     }
 }
