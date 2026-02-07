@@ -551,6 +551,35 @@ impl Database {
         }
     }
 
+    pub fn get_jobs_without_descriptions(&self, limit: Option<usize>) -> Result<Vec<Job>> {
+        let query = if let Some(lim) = limit {
+            format!(
+                "SELECT j.id, j.employer_id, e.name, j.title, j.url, j.source, j.status,
+                        j.pay_min, j.pay_max, j.job_code, j.raw_text, j.created_at, j.updated_at
+                 FROM jobs j
+                 LEFT JOIN employers e ON j.employer_id = e.id
+                 WHERE j.raw_text IS NULL AND j.url IS NOT NULL
+                 ORDER BY j.created_at ASC
+                 LIMIT {}",
+                lim
+            )
+        } else {
+            "SELECT j.id, j.employer_id, e.name, j.title, j.url, j.source, j.status,
+                    j.pay_min, j.pay_max, j.job_code, j.raw_text, j.created_at, j.updated_at
+             FROM jobs j
+             LEFT JOIN employers e ON j.employer_id = e.id
+             WHERE j.raw_text IS NULL AND j.url IS NOT NULL
+             ORDER BY j.created_at ASC"
+                .to_string()
+        };
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let jobs = stmt
+            .query_map([], Self::row_to_job)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(jobs)
+    }
+
     pub fn rank_jobs(&self, limit: usize) -> Result<Vec<(Job, f64)>> {
         // Get all non-closed jobs
         let jobs = self.list_jobs(None, None)?;

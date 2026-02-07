@@ -125,8 +125,21 @@ enum Commands {
 
     /// Fetch job description from URL
     Fetch {
-        /// Job ID to fetch
-        id: i64,
+        /// Job ID to fetch (not used with --all)
+        #[arg(required_unless_present = "all")]
+        id: Option<i64>,
+
+        /// Fetch all jobs without descriptions
+        #[arg(long)]
+        all: bool,
+
+        /// Maximum number of jobs to fetch (used with --all)
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Seconds to wait between fetches (default: 5)
+        #[arg(long, default_value_t = 5)]
+        delay: u64,
 
         /// Run browser in headless mode (may not work with LinkedIn auth)
         #[arg(long)]
@@ -1357,35 +1370,143 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Fetch { id, headless } => {
+        Commands::Fetch { id, all, limit, delay, headless } => {
             db.ensure_initialized()?;
 
-            // Get job from database
-            let job = db.get_job(id)?
-                .ok_or_else(|| anyhow!("Job #{} not found", id))?;
+            if all {
+                // Fetch all jobs without descriptions
+                let jobs = db.get_jobs_without_descriptions(limit)?;
 
-            if let Some(url) = &job.url {
-                println!("Fetching job description from: {}", url);
-                if headless {
-                    println!("Running in headless mode (may not work with LinkedIn auth)");
+                if jobs.is_empty() {
+                    println!("No jobs without descriptions found!");
+                    return Ok(());
                 }
 
-                // Fetch and extract description
-                let job_desc = fetch_job_description(url, headless)?;
+                let total = jobs.len();
+                println!("Found {} jobs without descriptions", total);
 
-                // Update job with description and pay info
-                db.update_job_description(id, &job_desc.text, job_desc.pay_min, job_desc.pay_max)?;
+                // Confirmation prompt for large batches
+                if total > 10 {
+                    use std::io::{self, Write};
+                    print!("Fetch {} jobs? This will take approximately {} minutes. (y/N): ",
+                           total, (total as u64 * delay) / 60);
+                    io::stdout().flush()?;
+                    let mut response = String::new();
+                    io::stdin().read_line(&mut response)?;
+                    if !response.trim().eq_ignore_ascii_case("y") {
+                        println!("Cancelled.");
+                        return Ok(());
+                    }
+                }
 
-                let pay_info = match (job_desc.pay_min, job_desc.pay_max) {
-                    (Some(min), Some(max)) => format!(" | Pay: ${}-${}", min, max),
-                    (Some(min), None) => format!(" | Pay: ${}+", min),
-                    (None, Some(max)) => format!(" | Pay: up to ${}", max),
-                    (None, None) => String::new(),
-                };
-                println!("✓ Job description fetched and stored ({} chars{})", job_desc.text.len(), pay_info);
+                // Warning for short delays
+                if delay < 3 {
+                    println!("⚠ Warning: Short delay ({} seconds) may trigger rate limiting", delay);
+                }
+
+                println!("\nFetching descriptions for {} jobs...\n", total);
+
+                let start_time = std::time::Instant::now();
+                let mut success_count = 0;
+                let mut fail_count = 0;
+                let mut failed_jobs = Vec::new();
+
+                // Fetch each job
+                for (i, job) in jobs.iter().enumerate() {
+                    let job_num = i + 1;
+                    let employer_name = job.employer_name.as_deref().unwrap_or("Unknown");
+                    println!("[{}/{}] Fetching job #{} ({} at {})",
+                             job_num, total, job.id,
+                             truncate(&job.title, 40),
+                             truncate(employer_name, 30));
+
+                    if let Some(url) = &job.url {
+                        match fetch_job_description(url, headless) {
+                            Ok(job_desc) => {
+                                match db.update_job_description(job.id, &job_desc.text,
+                                                               job_desc.pay_min, job_desc.pay_max) {
+                                    Ok(_) => {
+                                        let pay_info = match (job_desc.pay_min, job_desc.pay_max) {
+                                            (Some(min), Some(max)) => format!(" | Pay: ${}-${}", min/1000, max/1000),
+                                            (Some(min), None) => format!(" | Pay: ${}K+", min/1000),
+                                            (None, Some(max)) => format!(" | Pay: up to ${}K", max/1000),
+                                            (None, None) => String::new(),
+                                        };
+                                        println!("✓ Fetched ({} chars{})", job_desc.text.len(), pay_info);
+                                        success_count += 1;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("✗ Failed to save: {}", e);
+                                        fail_count += 1;
+                                        failed_jobs.push((job.id, format!("save error: {}", e)));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("✗ Failed to fetch: {}", e);
+                                fail_count += 1;
+                                failed_jobs.push((job.id, format!("fetch error: {}", e)));
+                            }
+                        }
+                    } else {
+                        eprintln!("✗ No URL available");
+                        fail_count += 1;
+                        failed_jobs.push((job.id, "no URL".to_string()));
+                    }
+
+                    // Delay between fetches (except after last one)
+                    if job_num < total {
+                        let delay_with_jitter = add_jitter(delay);
+                        countdown(delay_with_jitter);
+                    }
+                }
+
+                // Summary
+                let elapsed = start_time.elapsed();
+                println!("\n═══════════════════════════════════════════");
+                println!("Summary:");
+                println!("✓ Successfully fetched: {}/{}", success_count, total);
+                if fail_count > 0 {
+                    println!("✗ Failed: {}/{}", fail_count, total);
+                    if !failed_jobs.is_empty() {
+                        println!("\nFailed jobs:");
+                        for (job_id, reason) in failed_jobs {
+                            println!("  Job #{}: {}", job_id, reason);
+                        }
+                    }
+                }
+                println!("⏱ Total time: {}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60);
+                println!("═══════════════════════════════════════════");
+
             } else {
-                println!("Error: Job #{} has no URL", id);
-                return Err(anyhow!("Job has no URL to fetch from"));
+                // Single job fetch (original behavior)
+                let job_id = id.ok_or_else(|| anyhow!("Job ID required without --all flag"))?;
+                let job = db.get_job(job_id)?
+                    .ok_or_else(|| anyhow!("Job #{} not found", job_id))?;
+
+                if let Some(url) = &job.url {
+                    println!("Fetching job description from: {}", url);
+                    if headless {
+                        println!("Running in headless mode (may not work with LinkedIn auth)");
+                    }
+
+                    // Fetch and extract description
+                    let job_desc = fetch_job_description(url, headless)?;
+
+                    // Update job with description and pay info
+                    db.update_job_description(job_id, &job_desc.text, job_desc.pay_min, job_desc.pay_max)?;
+
+                    let pay_info = match (job_desc.pay_min, job_desc.pay_max) {
+                        (Some(min), Some(max)) => format!(" | Pay: ${}-${}", min, max),
+                        (Some(min), None) => format!(" | Pay: ${}+", min),
+                        (None, Some(max)) => format!(" | Pay: up to ${}", max),
+                        (None, None) => String::new(),
+                    };
+                    println!("✓ Job description fetched and stored ({} chars{})", job_desc.text.len(), pay_info);
+                } else {
+                    println!("Error: Job #{} has no URL", job_id);
+                    return Err(anyhow!("Job has no URL to fetch from"));
+                }
             }
         }
 
@@ -1514,4 +1635,25 @@ fn fetch_job_description(url: &str, headless: bool) -> Result<browser::JobDescri
 
         fetcher.fetch_job_description(url).await
     })
+}
+
+fn add_jitter(seconds: u64) -> u64 {
+    use rand::Rng;
+    let jitter = ((seconds as f64) * 0.2) as u64; // ±20%
+    let min = seconds.saturating_sub(jitter);
+    let max = seconds + jitter;
+    rand::thread_rng().gen_range(min..=max)
+}
+
+fn countdown(seconds: u64) {
+    use std::io::{self, Write};
+    print!("Waiting {} seconds before next fetch... ", seconds);
+    io::stdout().flush().unwrap();
+
+    for i in (1..=seconds).rev() {
+        print!("{}... ", i);
+        io::stdout().flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    println!();
 }
