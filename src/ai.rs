@@ -40,15 +40,20 @@ pub fn resolve_model(name: &str) -> Result<ModelSpec> {
             model_id: "claude-haiku-4-5-20251001".to_string(),
             short_name: "claude-haiku".to_string(),
         }),
+        "gpt-5.2" | "gpt5" => Ok(ModelSpec {
+            provider: ProviderKind::OpenAI,
+            model_id: "gpt-5.2".to_string(),
+            short_name: "gpt-5.2".to_string(),
+        }),
+        "gpt-5.2-pro" | "gpt5-pro" => Ok(ModelSpec {
+            provider: ProviderKind::OpenAI,
+            model_id: "gpt-5.2-pro".to_string(),
+            short_name: "gpt-5.2-pro".to_string(),
+        }),
         "gpt-4o" => Ok(ModelSpec {
             provider: ProviderKind::OpenAI,
             model_id: "gpt-4o".to_string(),
             short_name: "gpt-4o".to_string(),
-        }),
-        "o1" => Ok(ModelSpec {
-            provider: ProviderKind::OpenAI,
-            model_id: "o1".to_string(),
-            short_name: "o1".to_string(),
         }),
         "o3" => Ok(ModelSpec {
             provider: ProviderKind::OpenAI,
@@ -56,7 +61,7 @@ pub fn resolve_model(name: &str) -> Result<ModelSpec> {
             short_name: "o3".to_string(),
         }),
         _ => Err(anyhow!(
-            "Unknown model '{}'. Available: claude-sonnet, claude-opus, claude-haiku, gpt-4o, o1, o3",
+            "Unknown model '{}'. Available: claude-sonnet, claude-opus, claude-haiku, gpt-5.2, gpt-5.2-pro, gpt-4o, o3",
             name
         )),
     }
@@ -515,11 +520,17 @@ mod tests {
 
     #[test]
     fn test_resolve_model_openai() {
-        let spec = resolve_model("gpt-4o").unwrap();
-        assert_eq!(spec.model_id, "gpt-4o");
+        let spec = resolve_model("gpt-5.2").unwrap();
+        assert_eq!(spec.model_id, "gpt-5.2");
         assert!(matches!(spec.provider, ProviderKind::OpenAI));
 
-        let spec = resolve_model("o1").unwrap();
+        let spec = resolve_model("gpt5").unwrap();
+        assert_eq!(spec.short_name, "gpt-5.2");
+
+        let spec = resolve_model("gpt-5.2-pro").unwrap();
+        assert!(matches!(spec.provider, ProviderKind::OpenAI));
+
+        let spec = resolve_model("gpt-4o").unwrap();
         assert!(matches!(spec.provider, ProviderKind::OpenAI));
 
         let spec = resolve_model("o3").unwrap();
