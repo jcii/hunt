@@ -90,7 +90,14 @@ pub fn resolve_model(name: &str) -> Result<ModelSpec> {
 pub fn create_provider(spec: &ModelSpec) -> Result<Box<dyn AIProvider>> {
     match spec.provider {
         ProviderKind::ClaudeCode => {
-            let provider = ClaudeCodeProvider::new(spec.model_id.clone())?;
+            // Pass short alias (e.g. "sonnet") to claude CLI — full model IDs route through API billing
+            let cli_model = match spec.short_name.as_str() {
+                "claude-sonnet" => "sonnet",
+                "claude-opus" => "opus",
+                "claude-haiku" => "haiku",
+                _ => &spec.short_name,
+            };
+            let provider = ClaudeCodeProvider::new(cli_model.to_string())?;
             Ok(Box::new(provider))
         }
         ProviderKind::Anthropic => {
