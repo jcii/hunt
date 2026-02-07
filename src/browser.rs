@@ -58,6 +58,11 @@ impl JobFetcher {
             .context("Failed to connect to geckodriver. Make sure geckodriver is running.\n\
                      You can start it with: geckodriver --port 4444")?;
 
+        // Minimize to avoid stealing focus during automated fetches
+        if !headless {
+            let _ = driver.minimize_window().await;
+        }
+
         Ok(JobFetcher { driver })
     }
 

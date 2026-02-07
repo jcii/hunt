@@ -610,7 +610,12 @@ fn cleanup_artifacts(db: &Database, dry_run: bool) -> Result<usize> {
             title_lower.contains(pattern) && title_lower.len() < 50
         });
 
-        if is_artifact {
+        // Check if URL is a non-job link (alerts, search, settings, etc.)
+        let is_non_job_url = job.url.as_ref().is_some_and(|url| {
+            email::is_search_link(url)
+        });
+
+        if is_artifact || is_non_job_url {
             if !dry_run {
                 db.delete_job(job.id)?;
             }

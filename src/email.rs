@@ -235,6 +235,7 @@ fn is_navigation_artifact(text: &str) -> bool {
     // Filter patterns
     if text_lower.starts_with("jobs similar to")
         || text_lower.starts_with("jobs in ")
+        || text_lower.starts_with("manage job")
         || text_lower.contains("unsubscribe")
         || text_lower.contains("privacy")
     {
@@ -250,12 +251,13 @@ fn is_navigation_artifact(text: &str) -> bool {
     false
 }
 
-fn is_search_link(url: &str) -> bool {
-    // Filter LinkedIn search URLs
+pub fn is_search_link(url: &str) -> bool {
+    // Filter non-job LinkedIn/Indeed URLs (search, alerts, settings, etc.)
     // Examples:
     // - https://www.linkedin.com/comm/jobs/search
     // - https://www.linkedin.com/comm/jobs/search?keywords=...
-    url.contains("/jobs/search") || url.contains("/search?")
+    // - https://www.linkedin.com/comm/jobs/alerts
+    url.contains("/jobs/search") || url.contains("/search?") || url.contains("/jobs/alerts")
 }
 
 fn parse_linkedin_email(_subject: &str, body: &str) -> Result<Vec<ParsedJob>> {
@@ -651,6 +653,7 @@ mod tests {
         assert!(is_navigation_artifact("Jobs in Seattle, WA"));
         assert!(is_navigation_artifact("Unsubscribe from alerts"));
         assert!(is_navigation_artifact("Privacy settings"));
+        assert!(is_navigation_artifact("Manage job alerts"));
     }
 
     #[test]
@@ -693,6 +696,9 @@ mod tests {
         assert!(is_search_link("https://www.linkedin.com/comm/jobs/search"));
         assert!(is_search_link("https://www.linkedin.com/comm/jobs/search?keywords=Engineering+Manager"));
         assert!(is_search_link("https://www.linkedin.com/jobs/search?keywords=test"));
+
+        // LinkedIn alerts URLs
+        assert!(is_search_link("https://www.linkedin.com/comm/jobs/alerts"));
 
         // Indeed search URLs
         assert!(is_search_link("https://www.indeed.com/jobs/search?q=engineer"));
