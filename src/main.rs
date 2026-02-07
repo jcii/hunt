@@ -693,6 +693,9 @@ fn cleanup_duplicates(db: &Database, dry_run: bool) -> Result<usize> {
 }
 
 fn display_domain_keywords(keywords: &[models::JobKeyword]) {
+    // Legend
+    println!("  *** = required   ** = important   * = nice-to-have\n");
+
     let domains = [
         ("tech", "TECH"),
         ("discipline", "DISCIPLINE"),
@@ -1768,13 +1771,17 @@ fn main() -> Result<()> {
                 let job = db.get_job(job_id)?
                     .ok_or_else(|| anyhow!("Job #{} not found", job_id))?;
 
-                let keywords = db.get_job_keywords(job_id)?;
-                if keywords.is_empty() {
-                    println!("No stored keywords for job #{}. Run 'hunt keywords {}' to extract.", job_id, job_id);
-                    return Ok(());
-                }
+                let source_model = db.get_latest_keyword_model(job_id)?;
+                let source_model = match &source_model {
+                    Some(m) => m.as_str(),
+                    None => {
+                        println!("No stored keywords for job #{}. Run 'hunt keywords {}' to extract.", job_id, job_id);
+                        return Ok(());
+                    }
+                };
 
-                let source_model = &keywords[0].source_model;
+                let keywords = db.get_job_keywords(job_id, Some(source_model))?;
+
                 println!("Keywords for job #{}: {} (model: {})\n",
                          job_id, job.title, source_model);
 
@@ -1816,8 +1823,8 @@ fn main() -> Result<()> {
                     db.save_keyword_profile(job_id, &spec.short_name, &domain_kw.profile)?;
                 }
 
-                // Display results
-                let all_keywords = db.get_job_keywords(job_id)?;
+                // Display results — show only what we just stored
+                let all_keywords = db.get_job_keywords(job_id, Some(&spec.short_name))?;
                 println!("Keywords for job #{}: {} (model: {})\n",
                          job_id, job.title, spec.short_name);
 

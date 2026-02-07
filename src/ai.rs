@@ -418,22 +418,24 @@ pub fn extract_domain_keywords(
     job_text: &str,
 ) -> Result<DomainKeywords> {
     let prompt = format!(
-        "Analyze this job posting and extract keywords into four domains. \
-        For each keyword, assign a weight from 1-3:\n\
-        - 3 = explicitly required / hard requirement\n\
-        - 2 = clearly important / emphasized\n\
-        - 1 = mentioned once / nice to have\n\n\
-        Return EXACTLY in this format with no other text:\n\
-        TECH: keyword1/3, keyword2/2, keyword3/1\n\
-        DISCIPLINE: keyword1/3, keyword2/2\n\
-        CLOUD: keyword1/3, keyword2/1\n\
-        SOFT_SKILL: keyword1/2, keyword2/1\n\
-        PROFILE: A 2-3 sentence summary of what this role emphasizes.\n\n\
-        Domain guidelines:\n\
-        - TECH: programming languages, frameworks, databases, tools, protocols\n\
-        - DISCIPLINE: methodologies, practices, role types (DevOps, SRE, Agile, CI/CD)\n\
-        - CLOUD: cloud providers, cloud-specific services (AWS, GCP, Azure, S3, Lambda)\n\
-        - SOFT_SKILL: leadership, communication, mentoring, collaboration\n\n\
+        "Extract keywords from this job posting into exactly four domain lines plus a profile.\n\n\
+        RULES:\n\
+        - Each keyword is 1-3 words MAX (e.g. \"Kubernetes\" not \"Kubernetes container orchestration\")\n\
+        - NO duplicates across or within domains\n\
+        - Each keyword appears in exactly ONE domain\n\
+        - NO descriptions, years of experience, or degree requirements — just the skill/tool name\n\
+        - Weight: 3=explicitly required, 2=emphasized, 1=nice-to-have\n\n\
+        DOMAINS:\n\
+        - TECH: languages, frameworks, databases, tools (Python, Terraform, PostgreSQL, dbt)\n\
+        - DISCIPLINE: practices, methodologies, role focus (DevOps, SRE, CI/CD, Agile, microservices)\n\
+        - CLOUD: cloud providers and services only (AWS, GCP, Azure, S3, Lambda, EKS)\n\
+        - SOFT_SKILL: people skills (leadership, communication, mentoring)\n\n\
+        FORMAT — return exactly these 5 lines, nothing else:\n\
+        TECH: Kubernetes/3, Python/2, dbt/1\n\
+        DISCIPLINE: DevOps/3, SRE/2, Agile/1\n\
+        CLOUD: AWS/3, Azure/1\n\
+        SOFT_SKILL: leadership/3, communication/2\n\
+        PROFILE: 2-3 sentences summarizing what this role emphasizes.\n\n\
         Job posting:\n{}",
         job_text
     );
@@ -461,6 +463,18 @@ pub fn extract_domain_keywords(
         }
     }
 
+    // Deduplicate within each domain (case-insensitive, keep highest weight)
+    tech = dedup_keywords(tech);
+    discipline = dedup_keywords(discipline);
+    cloud = dedup_keywords(cloud);
+    soft_skill = dedup_keywords(soft_skill);
+
+    // Deduplicate across domains (keep in first domain seen)
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for list in [&mut tech, &mut discipline, &mut cloud, &mut soft_skill] {
+        list.retain(|(kw, _)| seen.insert(kw.to_lowercase()));
+    }
+
     Ok(DomainKeywords {
         tech,
         discipline,
@@ -468,6 +482,20 @@ pub fn extract_domain_keywords(
         soft_skill,
         profile,
     })
+}
+
+fn dedup_keywords(keywords: Vec<(String, i32)>) -> Vec<(String, i32)> {
+    let mut seen: std::collections::HashMap<String, (String, i32)> = std::collections::HashMap::new();
+    for (kw, weight) in keywords {
+        let key = kw.to_lowercase();
+        let entry = seen.entry(key).or_insert_with(|| (kw.clone(), weight));
+        if weight > entry.1 {
+            entry.1 = weight;
+        }
+    }
+    let mut result: Vec<(String, i32)> = seen.into_values().collect();
+    result.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+    result
 }
 
 fn parse_weighted_keywords(input: &str) -> Vec<(String, i32)> {

@@ -1268,14 +1268,26 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_job_keywords(&self, job_id: i64) -> Result<Vec<JobKeyword>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, job_id, keyword, domain, weight, source_model, created_at
-             FROM job_keywords WHERE job_id = ?1
-             ORDER BY domain, weight DESC, keyword",
-        )?;
+    pub fn get_job_keywords(&self, job_id: i64, source_model: Option<&str>) -> Result<Vec<JobKeyword>> {
+        let (sql, params_vec): (String, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(model) = source_model {
+            (
+                "SELECT id, job_id, keyword, domain, weight, source_model, created_at
+                 FROM job_keywords WHERE job_id = ?1 AND source_model = ?2
+                 ORDER BY domain, weight DESC, keyword".to_string(),
+                vec![Box::new(job_id), Box::new(model.to_string())],
+            )
+        } else {
+            (
+                "SELECT id, job_id, keyword, domain, weight, source_model, created_at
+                 FROM job_keywords WHERE job_id = ?1
+                 ORDER BY domain, weight DESC, keyword".to_string(),
+                vec![Box::new(job_id)],
+            )
+        };
 
-        let rows = stmt.query_map([job_id], |row| {
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params_ref: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params_ref.as_slice(), |row| {
             Ok(JobKeyword {
                 id: row.get(0)?,
                 job_id: row.get(1)?,
@@ -1289,6 +1301,21 @@ impl Database {
 
         rows.collect::<Result<Vec<_>, _>>()
             .context("Failed to list job keywords")
+    }
+
+    /// Get the most recent source_model used for keywords on a job
+    pub fn get_latest_keyword_model(&self, job_id: i64) -> Result<Option<String>> {
+        let result = self.conn.query_row(
+            "SELECT source_model FROM job_keywords WHERE job_id = ?1
+             ORDER BY created_at DESC LIMIT 1",
+            [job_id],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(model) => Ok(Some(model)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub fn save_keyword_profile(
@@ -1335,11 +1362,17 @@ impl Database {
 
     pub fn search_job_keywords(&self, query: &str) -> Result<Vec<(i64, String, String, String, i32)>> {
         let pattern = format!("%{}%", query);
+        // Use a subquery to only search the latest model's keywords per job
         let mut stmt = self.conn.prepare(
             "SELECT jk.job_id, j.title, jk.keyword, jk.domain, jk.weight
              FROM job_keywords jk
              JOIN jobs j ON jk.job_id = j.id
              WHERE LOWER(jk.keyword) LIKE LOWER(?1)
+               AND jk.source_model = (
+                   SELECT source_model FROM job_keywords
+                   WHERE job_id = jk.job_id
+                   ORDER BY created_at DESC LIMIT 1
+               )
              ORDER BY jk.job_id, jk.domain, jk.weight DESC, jk.keyword",
         )?;
 
