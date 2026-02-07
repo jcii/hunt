@@ -228,11 +228,6 @@ impl Database {
                 "ALTER TABLE jobs ADD COLUMN fetched_at TEXT",
                 [],
             )?;
-            // Backfill: jobs that already have descriptions were already fetched
-            self.conn.execute(
-                "UPDATE jobs SET fetched_at = updated_at WHERE raw_text IS NOT NULL",
-                [],
-            )?;
         }
 
         Ok(())
