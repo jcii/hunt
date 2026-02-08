@@ -216,6 +216,33 @@ enum Commands {
         #[arg(short, long)]
         employer: Option<String>,
     },
+
+    /// Run full refresh pipeline: email → fetch → keywords
+    Refresh {
+        /// Gmail address
+        #[arg(short, long, default_value = "jciispam@gmail.com")]
+        username: String,
+
+        /// Path to app password file
+        #[arg(short, long, default_value = "~/.gmail.app_password.txt")]
+        password_file: String,
+
+        /// Number of days to look back for emails
+        #[arg(short, long, default_value = "7")]
+        days: u32,
+
+        /// AI model for keyword extraction
+        #[arg(short, long, default_value = "claude-sonnet")]
+        model: String,
+
+        /// Run browser in headless mode
+        #[arg(long)]
+        headless: bool,
+
+        /// Seconds to wait between fetches
+        #[arg(long, default_value_t = 5)]
+        delay: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2033,6 +2060,131 @@ fn main() -> Result<()> {
         Commands::Browse { status, employer } => {
             db.ensure_initialized()?;
             tui::run_browse(&db, status.as_deref(), employer.as_deref())?;
+        }
+
+        Commands::Refresh { username, password_file, days, model, headless, delay } => {
+            db.ensure_initialized()?;
+
+            // Step 1: Email ingestion
+            println!("═══ Step 1: Fetching job alerts from email ═══\n");
+            let password_path = if password_file.starts_with("~/") {
+                let home = std::env::var("HOME").unwrap_or_default();
+                PathBuf::from(format!("{}/{}", home, &password_file[2..]))
+            } else {
+                PathBuf::from(&password_file)
+            };
+
+            println!("Connecting to Gmail as {}...", username);
+            match EmailConfig::from_gmail_password_file(&username, &password_path) {
+                Ok(config) => {
+                    let ingester = EmailIngester::new(config);
+                    println!("Searching for job alerts from the last {} days...", days);
+                    match ingester.fetch_job_alerts(&db, days, false) {
+                        Ok(stats) => {
+                            println!("  Emails found: {}", stats.emails_found);
+                            println!("  Jobs added:   {}", stats.jobs_added);
+                            if stats.errors > 0 {
+                                println!("  Errors:       {}", stats.errors);
+                            }
+                        }
+                        Err(e) => println!("  Email fetch failed: {}", e),
+                    }
+                }
+                Err(e) => println!("  Skipping email: {}", e),
+            }
+
+            // Step 2: Fetch job descriptions
+            println!("\n═══ Step 2: Fetching job descriptions ═══\n");
+            let jobs_to_fetch = db.get_jobs_to_fetch(None, false)?;
+            if jobs_to_fetch.is_empty() {
+                println!("All jobs already have descriptions.");
+            } else {
+                println!("Fetching descriptions for {} unfetched jobs...\n", jobs_to_fetch.len());
+                let mut success = 0;
+                let mut fail = 0;
+
+                for (i, job) in jobs_to_fetch.iter().enumerate() {
+                    let employer = job.employer_name.as_deref().unwrap_or("?");
+                    print!("[{}/{}] #{} {} at {} ... ",
+                           i + 1, jobs_to_fetch.len(), job.id,
+                           truncate(&job.title, 35), truncate(employer, 20));
+
+                    if let Some(url) = &job.url {
+                        match fetch_job_description(url, headless) {
+                            Ok(desc) => {
+                                let _ = db.update_job_description(job.id, &desc.text, desc.pay_min, desc.pay_max);
+                                if desc.no_longer_accepting {
+                                    let _ = db.update_job_status(job.id, "closed");
+                                }
+                                println!("{} chars", desc.text.len());
+                                success += 1;
+                            }
+                            Err(e) => {
+                                println!("FAILED: {}", e);
+                                fail += 1;
+                            }
+                        }
+                    } else {
+                        println!("no URL");
+                        fail += 1;
+                    }
+
+                    if i + 1 < jobs_to_fetch.len() {
+                        let wait = add_jitter(delay);
+                        countdown(wait);
+                    }
+                }
+                println!("\n  Fetched: {}, Failed: {}", success, fail);
+            }
+
+            // Step 3: Extract keywords
+            println!("\n═══ Step 3: Extracting keywords ═══\n");
+            let jobs_needing = db.get_jobs_needing_keywords(false)?;
+            if jobs_needing.is_empty() {
+                println!("All jobs with descriptions already have keywords.");
+            } else {
+                let spec = ai::resolve_model(&model)?;
+                let provider = ai::create_provider(&spec)?;
+                println!("Extracting keywords from {} jobs (model: {})\n",
+                         jobs_needing.len(), spec.short_name);
+
+                let mut success = 0;
+                let mut fail = 0;
+
+                for (i, job) in jobs_needing.iter().enumerate() {
+                    let employer = job.employer_name.as_deref().unwrap_or("?");
+                    print!("[{}/{}] #{} {} at {} ... ",
+                           i + 1, jobs_needing.len(), job.id,
+                           truncate(&job.title, 35), truncate(employer, 20));
+
+                    if let Some(text) = &job.raw_text {
+                        match ai::extract_domain_keywords(provider.as_ref(), text) {
+                            Ok(kw) => {
+                                let _ = db.add_job_keywords(job.id, &kw.tech, "tech", &spec.short_name);
+                                let _ = db.add_job_keywords(job.id, &kw.discipline, "discipline", &spec.short_name);
+                                let _ = db.add_job_keywords(job.id, &kw.cloud, "cloud", &spec.short_name);
+                                let _ = db.add_job_keywords(job.id, &kw.soft_skill, "soft_skill", &spec.short_name);
+                                if !kw.profile.is_empty() {
+                                    let _ = db.save_keyword_profile(job.id, &spec.short_name, &kw.profile);
+                                }
+                                let count = kw.tech.len() + kw.discipline.len()
+                                    + kw.cloud.len() + kw.soft_skill.len();
+                                println!("{} keywords", count);
+                                success += 1;
+                            }
+                            Err(e) => {
+                                println!("FAILED: {}", e);
+                                fail += 1;
+                            }
+                        }
+                    } else {
+                        println!("no text");
+                    }
+                }
+                println!("\n  Extracted: {}, Failed: {}", success, fail);
+            }
+
+            println!("\n═══ Refresh complete ═══");
         }
     }
 

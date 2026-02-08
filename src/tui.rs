@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -15,27 +15,34 @@ use crate::models::{Job, JobKeyword, JobKeywordProfile};
 
 struct AppState {
     jobs: Vec<Job>,
-    selected: usize,
+    visible: Vec<usize>, // indices into jobs matching current filter
+    selected: usize,      // index into visible
     scroll_offset: u16,
     keywords: Vec<JobKeyword>,
     profile: Option<JobKeywordProfile>,
     keyword_model: Option<String>,
+    search_active: bool,
+    search_query: String,
 }
 
 impl AppState {
     fn new(jobs: Vec<Job>) -> Self {
+        let visible: Vec<usize> = (0..jobs.len()).collect();
         Self {
             jobs,
+            visible,
             selected: 0,
             scroll_offset: 0,
             keywords: Vec::new(),
             profile: None,
             keyword_model: None,
+            search_active: false,
+            search_query: String::new(),
         }
     }
 
     fn current_job(&self) -> Option<&Job> {
-        self.jobs.get(self.selected)
+        self.visible.get(self.selected).and_then(|&i| self.jobs.get(i))
     }
 
     fn load_keywords(&mut self, db: &Database) {
@@ -52,8 +59,29 @@ impl AppState {
         }
     }
 
+    fn update_filter(&mut self) {
+        if self.search_query.is_empty() {
+            self.visible = (0..self.jobs.len()).collect();
+        } else {
+            let query = self.search_query.to_lowercase();
+            self.visible = self.jobs.iter().enumerate()
+                .filter(|(_, job)| {
+                    job.title.to_lowercase().contains(&query)
+                        || job.employer_name.as_deref().unwrap_or("").to_lowercase().contains(&query)
+                })
+                .map(|(i, _)| i)
+                .collect();
+        }
+        if self.visible.is_empty() {
+            self.selected = 0;
+        } else {
+            self.selected = self.selected.min(self.visible.len() - 1);
+        }
+        self.scroll_offset = 0;
+    }
+
     fn next(&mut self) {
-        if !self.jobs.is_empty() && self.selected < self.jobs.len() - 1 {
+        if !self.visible.is_empty() && self.selected < self.visible.len() - 1 {
             self.selected += 1;
             self.scroll_offset = 0;
         }
@@ -66,12 +94,31 @@ impl AppState {
         }
     }
 
+    fn page_down(&mut self, page_size: usize) {
+        if self.visible.is_empty() { return; }
+        self.selected = (self.selected + page_size).min(self.visible.len() - 1);
+        self.scroll_offset = 0;
+    }
+
+    fn page_up(&mut self, page_size: usize) {
+        self.selected = self.selected.saturating_sub(page_size);
+        self.scroll_offset = 0;
+    }
+
     fn scroll_down(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_add(3);
     }
 
     fn scroll_up(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_sub(3);
+    }
+
+    fn update_current_job_status(&mut self, db: &Database, status: &str) {
+        if let Some(&idx) = self.visible.get(self.selected) {
+            let job_id = self.jobs[idx].id;
+            let _ = db.update_job_status(job_id, status);
+            self.jobs[idx].status = status.to_string();
+        }
     }
 }
 
@@ -85,14 +132,12 @@ pub fn run_browse(db: &Database, status: Option<&str>, employer: Option<&str>) -
     let mut state = AppState::new(jobs);
     state.load_keywords(db);
 
-    // Setup terminal
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
     let result = run_loop(&mut terminal, &mut state, db);
 
-    // Restore terminal
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
@@ -114,53 +159,85 @@ fn run_loop(
             if key.kind != KeyEventKind::Press {
                 continue;
             }
+
+            // Search input mode
+            if state.search_active {
+                match key.code {
+                    KeyCode::Esc => {
+                        state.search_active = false;
+                        state.search_query.clear();
+                        state.update_filter();
+                        list_state.select(Some(state.selected));
+                        state.load_keywords(db);
+                    }
+                    KeyCode::Enter => {
+                        state.search_active = false;
+                        if !state.visible.is_empty() {
+                            state.load_keywords(db);
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        state.search_query.pop();
+                        state.update_filter();
+                        list_state.select(Some(state.selected));
+                        state.load_keywords(db);
+                    }
+                    KeyCode::Char(c) => {
+                        state.search_query.push(c);
+                        state.update_filter();
+                        list_state.select(Some(state.selected));
+                        state.load_keywords(db);
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            // Normal mode
             let prev_selected = state.selected;
+            let page_size = (terminal.size()?.height as usize).saturating_sub(4) / 2;
+
             match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => break,
+                KeyCode::Char('q') => break,
+                KeyCode::Esc => {
+                    if !state.search_query.is_empty() {
+                        state.search_query.clear();
+                        state.update_filter();
+                        list_state.select(Some(state.selected));
+                        state.load_keywords(db);
+                    } else {
+                        break;
+                    }
+                }
                 KeyCode::Down | KeyCode::Char('j') => state.next(),
                 KeyCode::Up | KeyCode::Char('k') => state.prev(),
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    state.page_down(page_size);
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    state.page_up(page_size);
+                }
+                KeyCode::Char('g') => {
+                    state.selected = 0;
+                    state.scroll_offset = 0;
+                }
+                KeyCode::Char('G') => {
+                    if !state.visible.is_empty() {
+                        state.selected = state.visible.len() - 1;
+                        state.scroll_offset = 0;
+                    }
+                }
                 KeyCode::Char('J') | KeyCode::PageDown => state.scroll_down(),
                 KeyCode::Char('K') | KeyCode::PageUp => state.scroll_up(),
-                KeyCode::Char('n') => {
-                    if let Some(job) = state.current_job() {
-                        let _ = db.update_job_status(job.id, "new");
-                        if let Some(j) = state.jobs.get_mut(state.selected) {
-                            j.status = "new".to_string();
-                        }
-                    }
+                KeyCode::Char('/') => {
+                    state.search_active = true;
+                    state.search_query.clear();
                 }
-                KeyCode::Char('r') => {
-                    if let Some(job) = state.current_job() {
-                        let _ = db.update_job_status(job.id, "reviewing");
-                        if let Some(j) = state.jobs.get_mut(state.selected) {
-                            j.status = "reviewing".to_string();
-                        }
-                    }
-                }
-                KeyCode::Char('a') => {
-                    if let Some(job) = state.current_job() {
-                        let _ = db.update_job_status(job.id, "applied");
-                        if let Some(j) = state.jobs.get_mut(state.selected) {
-                            j.status = "applied".to_string();
-                        }
-                    }
-                }
-                KeyCode::Char('x') => {
-                    if let Some(job) = state.current_job() {
-                        let _ = db.update_job_status(job.id, "rejected");
-                        if let Some(j) = state.jobs.get_mut(state.selected) {
-                            j.status = "rejected".to_string();
-                        }
-                    }
-                }
-                KeyCode::Char('c') => {
-                    if let Some(job) = state.current_job() {
-                        let _ = db.update_job_status(job.id, "closed");
-                        if let Some(j) = state.jobs.get_mut(state.selected) {
-                            j.status = "closed".to_string();
-                        }
-                    }
-                }
+                KeyCode::Char('n') => state.update_current_job_status(db, "new"),
+                KeyCode::Char('r') => state.update_current_job_status(db, "reviewing"),
+                KeyCode::Char('a') => state.update_current_job_status(db, "applied"),
+                KeyCode::Char('x') => state.update_current_job_status(db, "rejected"),
+                KeyCode::Char('c') => state.update_current_job_status(db, "closed"),
                 _ => {}
             }
             if state.selected != prev_selected {
@@ -172,42 +249,76 @@ fn run_loop(
     Ok(())
 }
 
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else if max <= 2 {
+        s.chars().take(max).collect()
+    } else {
+        let mut end = max - 2;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}..", &s[..end])
+    }
+}
+
 fn draw(frame: &mut Frame, state: &AppState, list_state: &mut ListState) {
+    // Main layout: content + footer
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(frame.area());
+
+    // Left/right split
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(35),
             Constraint::Percentage(65),
         ])
-        .split(frame.area());
+        .split(main_chunks[0]);
+
+    // Compute column widths for job list
+    // highlight symbol "> " = 2, borders = 2
+    let usable = (chunks[0].width as usize).saturating_sub(4);
+    // Format: "S #NNNN " = 8 chars, then title + space + employer
+    let fixed = 9; // prefix(8) + gap(1)
+    let remaining = usable.saturating_sub(fixed);
+    let emp_w = (remaining * 35 / 100).max(6).min(18);
+    let title_w = remaining.saturating_sub(emp_w);
 
     // Left panel: job list
-    let items: Vec<ListItem> = state
-        .jobs
-        .iter()
-        .map(|job| {
-            let status_icon = match job.status.as_str() {
-                "new" => " ",
-                "reviewing" => "*",
-                "applied" => "+",
-                "rejected" => "x",
-                "closed" => "-",
-                _ => "?",
-            };
-            let employer = job.employer_name.as_deref().unwrap_or("?");
-            let title = if job.title.len() > 35 {
-                format!("{}...", &job.title[..32])
-            } else {
-                job.title.clone()
-            };
-            ListItem::new(format!("{} #{:<4} {} | {}", status_icon, job.id, title, employer))
-        })
-        .collect();
+    let items: Vec<ListItem> = state.visible.iter().map(|&idx| {
+        let job = &state.jobs[idx];
+        let status_icon = match job.status.as_str() {
+            "new" => " ",
+            "reviewing" => "*",
+            "applied" => "+",
+            "rejected" => "x",
+            "closed" => "-",
+            _ => "?",
+        };
+        let employer = job.employer_name.as_deref().unwrap_or("?");
+        let title = truncate_str(&job.title, title_w);
+        let emp = truncate_str(employer, emp_w);
+        ListItem::new(Line::from(vec![
+            Span::raw(format!("{} #{:<4} {:<width$}", status_icon, job.id, title, width = title_w)),
+            Span::styled(
+                format!(" {:<width$}", emp, width = emp_w),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]))
+    }).collect();
+
+    let list_title = if !state.search_query.is_empty() {
+        format!(" Jobs ({}/{}) \"{}\" ", state.visible.len(), state.jobs.len(), state.search_query)
+    } else {
+        format!(" Jobs ({}) ", state.jobs.len())
+    };
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(format!(
-            " Jobs ({}) ", state.jobs.len()
-        )))
+        .block(Block::default().borders(Borders::ALL).title(list_title))
         .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
         .highlight_symbol("> ");
 
@@ -222,17 +333,19 @@ fn draw(frame: &mut Frame, state: &AppState, list_state: &mut ListState) {
 
     frame.render_widget(detail_widget, chunks[1]);
 
-    // Footer help
-    let help_area = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(frame.area());
-
-    let help = Paragraph::new(
-        " j/k:navigate  J/K:scroll  n:new r:reviewing a:applied x:reject c:close  q:quit"
-    )
-    .style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(help, help_area[1]);
+    // Footer
+    let footer_text = if state.search_active {
+        format!("/{}", state.search_query)
+    } else {
+        " j/k:nav  ^D/^U:page  g/G:top/end  /:search  J/K:scroll  n/r/a/x/c:status  q:quit".to_string()
+    };
+    let footer_style = if state.search_active {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let footer = Paragraph::new(footer_text).style(footer_style);
+    frame.render_widget(footer, main_chunks[1]);
 }
 
 fn build_detail<'a>(state: &'a AppState) -> Text<'a> {
