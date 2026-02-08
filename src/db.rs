@@ -84,7 +84,10 @@ impl Database {
                 key_investors TEXT,
                 ownership_concerns TEXT,
                 ownership_type TEXT,
-                ownership_research_updated TEXT
+                ownership_research_updated TEXT,
+                glassdoor_rating REAL,
+                glassdoor_review_count INTEGER,
+                last_glassdoor_fetch TEXT
             );
 
             CREATE TABLE IF NOT EXISTS jobs (
@@ -250,6 +253,17 @@ impl Database {
                 ALTER TABLE employers ADD COLUMN ownership_concerns TEXT;
                 ALTER TABLE employers ADD COLUMN ownership_type TEXT;
                 ALTER TABLE employers ADD COLUMN ownership_research_updated TEXT;
+                "#,
+            )?;
+        }
+
+        // Check if glassdoor summary columns exist
+        if !columns.contains(&"glassdoor_rating".to_string()) {
+            self.conn.execute_batch(
+                r#"
+                ALTER TABLE employers ADD COLUMN glassdoor_rating REAL;
+                ALTER TABLE employers ADD COLUMN glassdoor_review_count INTEGER;
+                ALTER TABLE employers ADD COLUMN last_glassdoor_fetch TEXT;
                 "#,
             )?;
         }
@@ -441,7 +455,8 @@ impl Database {
              controversies, labor_practices, environmental_issues, political_donations,
              evil_summary, public_research_updated_at,
              parent_company, pe_owner, pe_firm_url, vc_investors, key_investors,
-             ownership_concerns, ownership_type, ownership_research_updated
+             ownership_concerns, ownership_type, ownership_research_updated,
+             glassdoor_rating, glassdoor_review_count, last_glassdoor_fetch
              FROM employers",
         );
         if status.is_some() {
@@ -468,7 +483,8 @@ impl Database {
              controversies, labor_practices, environmental_issues, political_donations,
              evil_summary, public_research_updated_at,
              parent_company, pe_owner, pe_firm_url, vc_investors, key_investors,
-             ownership_concerns, ownership_type, ownership_research_updated
+             ownership_concerns, ownership_type, ownership_research_updated,
+             glassdoor_rating, glassdoor_review_count, last_glassdoor_fetch
              FROM employers WHERE LOWER(name) = LOWER(?1)",
             [name],
             Self::row_to_employer,
@@ -630,6 +646,9 @@ impl Database {
             ownership_concerns: row.get(27)?,
             ownership_type: row.get(28)?,
             ownership_research_updated: row.get(29)?,
+            glassdoor_rating: row.get(30)?,
+            glassdoor_review_count: row.get(31)?,
+            last_glassdoor_fetch: row.get(32)?,
         })
     }
 
@@ -1584,6 +1603,7 @@ impl Database {
             .context("Failed to list Glassdoor reviews")
     }
 
+    #[allow(dead_code)]
     pub fn get_recent_review_count(&self, employer_id: i64, since: &str) -> Result<i64> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM glassdoor_reviews
@@ -1624,6 +1644,39 @@ impl Database {
         )?;
 
         Ok((positive, negative, neutral, avg_rating))
+    }
+
+    pub fn update_employer_glassdoor_summary(&self, employer_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE employers SET
+                glassdoor_rating = (SELECT AVG(rating) FROM glassdoor_reviews WHERE employer_id = ?1),
+                glassdoor_review_count = (SELECT COUNT(*) FROM glassdoor_reviews WHERE employer_id = ?1),
+                last_glassdoor_fetch = datetime('now'),
+                updated_at = datetime('now')
+             WHERE id = ?1",
+            [employer_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get all employers that have glassdoor reviews
+    pub fn list_employers_with_glassdoor(&self) -> Result<Vec<Employer>> {
+        let sql = "SELECT id, name, domain, status, notes, created_at, updated_at,
+             crunchbase_url, funding_stage, total_funding, last_funding_date,
+             yc_batch, yc_url, hn_mentions_count, recent_news, research_updated_at,
+             controversies, labor_practices, environmental_issues, political_donations,
+             evil_summary, public_research_updated_at,
+             parent_company, pe_owner, pe_firm_url, vc_investors, key_investors,
+             ownership_concerns, ownership_type, ownership_research_updated,
+             glassdoor_rating, glassdoor_review_count, last_glassdoor_fetch
+             FROM employers
+             WHERE glassdoor_review_count > 0
+             ORDER BY glassdoor_rating DESC";
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([], Self::row_to_employer)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list employers with glassdoor data")
     }
 
     fn row_to_glassdoor_review(row: &rusqlite::Row) -> rusqlite::Result<GlassdoorReview> {

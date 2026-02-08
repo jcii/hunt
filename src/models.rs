@@ -35,6 +35,10 @@ pub struct Employer {
     pub ownership_concerns: Option<String>,
     pub ownership_type: Option<String>,
     pub ownership_research_updated: Option<String>,
+    // Glassdoor summary fields (cached from glassdoor_reviews)
+    pub glassdoor_rating: Option<f64>,
+    pub glassdoor_review_count: Option<i64>,
+    pub last_glassdoor_fetch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

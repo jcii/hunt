@@ -366,25 +366,30 @@ enum ResumeCommands {
 
 #[derive(Subcommand)]
 enum GlassdoorCommands {
-    /// Fetch recent reviews for watched employers
+    /// Fetch reviews for employers
     Fetch {
-        /// Specific employer name (optional, fetches all watched if not specified)
+        /// Specific employer name
         #[arg(short, long)]
         employer: Option<String>,
+
+        /// Fetch for all employers (not just 'ok' status)
+        #[arg(long)]
+        all: bool,
+
+        /// Re-fetch even if reviews already exist
+        #[arg(long)]
+        force: bool,
 
         /// Dry run - show what would be fetched without storing
         #[arg(long)]
         dry_run: bool,
     },
 
-    /// List reviews for an employer
-    List {
-        /// Employer name
-        employer: String,
-    },
+    /// List all employers with Glassdoor data
+    List,
 
-    /// Show sentiment summary for an employer
-    Summary {
+    /// Show Glassdoor reviews and summary for an employer
+    Show {
         /// Employer name
         employer: String,
     },
@@ -1462,33 +1467,53 @@ fn main() -> Result<()> {
         Commands::Glassdoor { command } => {
             db.ensure_initialized()?;
             match command {
-                GlassdoorCommands::Fetch { employer, dry_run } => {
+                GlassdoorCommands::Fetch { employer, all, force, dry_run } => {
                     let employers_to_fetch = if let Some(name) = employer {
                         vec![db.get_employer_by_name(&name)?
                             .ok_or_else(|| anyhow!("Employer '{}' not found", name))?]
+                    } else if all {
+                        db.list_employers(None)?
                     } else {
-                        // Get all watched employers (status = "ok")
                         db.list_employers(Some("ok"))?
                     };
 
                     if employers_to_fetch.is_empty() {
-                        println!("No watched employers found. Use 'hunt employer ok <name>' to watch an employer.");
+                        println!("No employers found. Use 'hunt employer ok <name>' to watch an employer.");
                         return Ok(());
                     }
 
-                    println!("Fetching Glassdoor reviews for {} employer(s)...", employers_to_fetch.len());
+                    // Filter out employers that already have reviews (unless --force)
+                    let employers_to_fetch: Vec<_> = if force {
+                        employers_to_fetch
+                    } else {
+                        employers_to_fetch.into_iter()
+                            .filter(|e| e.glassdoor_review_count.unwrap_or(0) == 0)
+                            .collect()
+                    };
+
+                    if employers_to_fetch.is_empty() {
+                        println!("All employers already have Glassdoor reviews. Use --force to re-fetch.");
+                        return Ok(());
+                    }
+
+                    println!("Fetching Glassdoor reviews for {} employer(s){}...",
+                             employers_to_fetch.len(),
+                             if force { " (--force)" } else { "" });
                     let mut total_new = 0;
                     let mut total_errors = 0;
 
-                    for emp in employers_to_fetch {
+                    for emp in &employers_to_fetch {
                         print!("  {} ... ", emp.name);
-                        match fetch_glassdoor_reviews(&db, &emp, dry_run) {
+                        match fetch_glassdoor_reviews(&db, emp, dry_run) {
                             Ok(count) => {
                                 total_new += count;
+                                if !dry_run {
+                                    let _ = db.update_employer_glassdoor_summary(emp.id);
+                                }
                                 if dry_run {
                                     println!("would add {} review(s)", count);
                                 } else {
-                                    println!("added {} new review(s)", count);
+                                    println!("added {} review(s)", count);
                                 }
                             }
                             Err(e) => {
@@ -1509,17 +1534,57 @@ fn main() -> Result<()> {
                     }
                 }
 
-                GlassdoorCommands::List { employer } => {
+                GlassdoorCommands::List => {
+                    let employers = db.list_employers_with_glassdoor()?;
+                    if employers.is_empty() {
+                        println!("No Glassdoor data collected yet. Run 'hunt glassdoor fetch' to collect.");
+                    } else {
+                        println!("{:<6} {:<30} {:>6} {:>10} {:<20}",
+                                 "ID", "EMPLOYER", "RATING", "REVIEWS", "LAST FETCHED");
+                        println!("{}", "-".repeat(75));
+                        for emp in &employers {
+                            println!("{:<6} {:<30} {:>5.1}★ {:>10} {:<20}",
+                                     emp.id,
+                                     truncate(&emp.name, 28),
+                                     emp.glassdoor_rating.unwrap_or(0.0),
+                                     emp.glassdoor_review_count.unwrap_or(0),
+                                     emp.last_glassdoor_fetch.as_deref().unwrap_or("-"),
+                            );
+                        }
+                        println!("\nTotal: {} employer(s) with Glassdoor data", employers.len());
+                    }
+                }
+
+                GlassdoorCommands::Show { employer } => {
                     let emp = db.get_employer_by_name(&employer)?
                         .ok_or_else(|| anyhow!("Employer '{}' not found", employer))?;
 
-                    let reviews = db.list_glassdoor_reviews(Some(emp.id))?;
-                    if reviews.is_empty() {
+                    // Summary
+                    let (positive, negative, neutral, avg_rating) = db.get_sentiment_summary(emp.id)?;
+                    let total = positive + negative + neutral;
+
+                    if total == 0 {
                         println!("No Glassdoor reviews found for '{}'.", employer);
-                    } else {
-                        println!("Glassdoor reviews for '{}' ({} total):\n", employer, reviews.len());
+                        println!("Run 'hunt glassdoor fetch --employer \"{}\"' to collect.", employer);
+                        return Ok(());
+                    }
+
+                    println!("Glassdoor: {} — {:.1}★ ({} reviews)\n", employer, avg_rating, total);
+                    println!("Sentiment:");
+                    println!("  Positive: {} ({:.0}%)", positive, positive as f64 / total as f64 * 100.0);
+                    println!("  Neutral:  {} ({:.0}%)", neutral, neutral as f64 / total as f64 * 100.0);
+                    println!("  Negative: {} ({:.0}%)", negative, negative as f64 / total as f64 * 100.0);
+
+                    if let Some(fetched) = &emp.last_glassdoor_fetch {
+                        println!("  Last fetched: {}", fetched);
+                    }
+
+                    // Reviews
+                    let reviews = db.list_glassdoor_reviews(Some(emp.id))?;
+                    if !reviews.is_empty() {
+                        println!("\nReviews:\n");
                         for review in reviews {
-                            println!("{:<6} {:>4.1}★ {:<10} {:<20}",
+                            println!("{:<6} {:>4.1}★ {:<10} {}",
                                 review.id,
                                 review.rating,
                                 review.sentiment,
@@ -1536,29 +1601,6 @@ fn main() -> Result<()> {
                             }
                             println!();
                         }
-                    }
-                }
-
-                GlassdoorCommands::Summary { employer } => {
-                    let emp = db.get_employer_by_name(&employer)?
-                        .ok_or_else(|| anyhow!("Employer '{}' not found", employer))?;
-
-                    let (positive, negative, neutral, avg_rating) = db.get_sentiment_summary(emp.id)?;
-                    let total = positive + negative + neutral;
-
-                    println!("Glassdoor Review Summary for '{}':", employer);
-                    println!("  Total reviews: {}", total);
-                    println!("  Average rating: {:.1}★", avg_rating);
-                    println!("\nSentiment breakdown:");
-                    println!("  Positive: {} ({:.1}%)", positive, (positive as f64 / total as f64 * 100.0));
-                    println!("  Neutral:  {} ({:.1}%)", neutral, (neutral as f64 / total as f64 * 100.0));
-                    println!("  Negative: {} ({:.1}%)", negative, (negative as f64 / total as f64 * 100.0));
-
-                    // Alert on new reviews (last 7 days)
-                    let seven_days_ago = chrono::Local::now() - chrono::Duration::days(7);
-                    let recent_count = db.get_recent_review_count(emp.id, &seven_days_ago.format("%Y-%m-%d").to_string())?;
-                    if recent_count > 0 {
-                        println!("\n⚠ ALERT: {} new review(s) in the last 7 days", recent_count);
                     }
                 }
             }
