@@ -9,7 +9,6 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use db::Database;
 use email::{EmailConfig, EmailIngester};
-use models::Employer;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -366,7 +365,7 @@ enum ResumeCommands {
 
 #[derive(Subcommand)]
 enum GlassdoorCommands {
-    /// Fetch reviews for employers
+    /// Fetch reviews for employers via AI research
     Fetch {
         /// Specific employer name
         #[arg(short, long)]
@@ -379,6 +378,10 @@ enum GlassdoorCommands {
         /// Re-fetch even if reviews already exist
         #[arg(long)]
         force: bool,
+
+        /// AI model to use
+        #[arg(short, long, default_value = "claude-sonnet")]
+        model: String,
 
         /// Dry run - show what would be fetched without storing
         #[arg(long)]
@@ -404,93 +407,7 @@ enum StartupCommands {
     },
 }
 
-fn analyze_sentiment(text: &str, rating: f64) -> String {
-    // Simple sentiment analysis based on rating and keywords
-    let text_lower = text.to_lowercase();
-
-    // Positive keywords
-    let positive_keywords = [
-        "great", "excellent", "amazing", "wonderful", "fantastic", "awesome",
-        "love", "best", "perfect", "highly recommend", "outstanding", "brilliant",
-        "good", "nice", "friendly", "supportive", "flexible", "balanced",
-    ];
-
-    // Negative keywords
-    let negative_keywords = [
-        "terrible", "awful", "horrible", "worst", "poor", "bad", "toxic",
-        "micromanage", "overwork", "underpaid", "stressful", "dysfunctional",
-        "disorganized", "politics", "nepotism", "discrimination", "harassment",
-    ];
-
-    let positive_count = positive_keywords.iter()
-        .filter(|&kw| text_lower.contains(kw))
-        .count();
-
-    let negative_count = negative_keywords.iter()
-        .filter(|&kw| text_lower.contains(kw))
-        .count();
-
-    // Combine rating and keyword analysis
-    if rating >= 4.0 && positive_count > negative_count {
-        "positive".to_string()
-    } else if rating <= 2.0 || negative_count > positive_count + 1 {
-        "negative".to_string()
-    } else {
-        "neutral".to_string()
-    }
-}
-
-fn fetch_glassdoor_reviews(db: &Database, employer: &Employer, dry_run: bool) -> Result<usize> {
-    // Note: This is a placeholder implementation that generates mock data
-    // In a real implementation, you would:
-    // 1. Use web scraping with the scraper crate to fetch from Glassdoor
-    // 2. Handle authentication and rate limiting
-    // 3. Parse the HTML to extract review data
-    // 4. Store reviews with proper deduplication
-
-    // For now, generate sample reviews to demonstrate the functionality
-    let sample_reviews = vec![
-        (4.5, Some("Great place to work"), Some("Good culture, benefits"), Some("Some long hours"), "2026-01-15"),
-        (3.0, Some("Average experience"), Some("Decent pay"), Some("Limited growth"), "2026-01-10"),
-        (5.0, Some("Excellent company"), Some("Amazing team, great work-life balance"), Some("None really"), "2026-01-05"),
-    ];
-
-    let mut added = 0;
-
-    for (rating, title, pros, cons, review_date) in sample_reviews {
-        // Build review text for sentiment analysis
-        let mut review_text = String::new();
-        if let Some(t) = title {
-            review_text.push_str(t);
-            review_text.push(' ');
-        }
-        if let Some(p) = pros {
-            review_text.push_str(p);
-            review_text.push(' ');
-        }
-        if let Some(c) = cons {
-            review_text.push_str(c);
-        }
-
-        let sentiment = analyze_sentiment(&review_text, rating);
-
-        if !dry_run {
-            db.add_glassdoor_review(
-                employer.id,
-                rating,
-                title,
-                pros,
-                cons,
-                Some(&review_text),
-                &sentiment,
-                Some(review_date),
-            )?;
-        }
-        added += 1;
-    }
-
-    Ok(added)
-}
+// (glassdoor reviews now fetched via AI in ai::research_glassdoor)
 
 #[derive(Debug, Default)]
 struct StartupResearchData {
@@ -1467,7 +1384,10 @@ fn main() -> Result<()> {
         Commands::Glassdoor { command } => {
             db.ensure_initialized()?;
             match command {
-                GlassdoorCommands::Fetch { employer, all, force, dry_run } => {
+                GlassdoorCommands::Fetch { employer, all, force, model, dry_run } => {
+                    let spec = ai::resolve_model(&model)?;
+                    let provider = ai::create_provider(&spec)?;
+
                     let employers_to_fetch = if let Some(name) = employer {
                         vec![db.get_employer_by_name(&name)?
                             .ok_or_else(|| anyhow!("Employer '{}' not found", name))?]
@@ -1496,42 +1416,50 @@ fn main() -> Result<()> {
                         return Ok(());
                     }
 
-                    println!("Fetching Glassdoor reviews for {} employer(s){}...",
-                             employers_to_fetch.len(),
-                             if force { " (--force)" } else { "" });
+                    println!("Researching Glassdoor reviews for {} employer(s) (model: {}){}...\n",
+                             employers_to_fetch.len(), spec.short_name,
+                             if force { " --force" } else { "" });
                     let mut total_new = 0;
                     let mut total_errors = 0;
 
                     for emp in &employers_to_fetch {
                         print!("  {} ... ", emp.name);
-                        match fetch_glassdoor_reviews(&db, emp, dry_run) {
-                            Ok(count) => {
+                        if dry_run {
+                            println!("(dry run)");
+                            continue;
+                        }
+
+                        match ai::research_glassdoor(provider.as_ref(), &emp.name) {
+                            Ok(research) => {
+                                let count = research.reviews.len();
+                                // Clear old reviews if force
+                                if force {
+                                    let _ = db.delete_glassdoor_reviews(emp.id);
+                                }
+                                for review in &research.reviews {
+                                    let _ = db.add_glassdoor_review(
+                                        emp.id,
+                                        review.rating,
+                                        Some(&review.title),
+                                        Some(&review.pros),
+                                        Some(&review.cons),
+                                        None,
+                                        &review.sentiment,
+                                        Some(&review.review_date),
+                                    );
+                                }
+                                let _ = db.update_employer_glassdoor_summary(emp.id);
+                                println!("{} reviews", count);
                                 total_new += count;
-                                if !dry_run {
-                                    let _ = db.update_employer_glassdoor_summary(emp.id);
-                                }
-                                if dry_run {
-                                    println!("would add {} review(s)", count);
-                                } else {
-                                    println!("added {} review(s)", count);
-                                }
                             }
                             Err(e) => {
                                 total_errors += 1;
-                                println!("error: {}", e);
+                                println!("FAILED: {}", e);
                             }
                         }
                     }
 
-                    println!("\nSummary:");
-                    if dry_run {
-                        println!("  Would add {} review(s)", total_new);
-                    } else {
-                        println!("  Added {} review(s)", total_new);
-                    }
-                    if total_errors > 0 {
-                        println!("  Errors: {}", total_errors);
-                    }
+                    println!("\n  Added: {}, Errors: {}", total_new, total_errors);
                 }
 
                 GlassdoorCommands::List => {

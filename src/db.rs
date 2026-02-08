@@ -1646,6 +1646,14 @@ impl Database {
         Ok((positive, negative, neutral, avg_rating))
     }
 
+    pub fn delete_glassdoor_reviews(&self, employer_id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM glassdoor_reviews WHERE employer_id = ?1",
+            [employer_id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_employer_glassdoor_summary(&self, employer_id: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE employers SET

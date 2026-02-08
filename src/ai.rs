@@ -673,6 +673,87 @@ pub fn tailor_resume_full(
     provider.complete(&prompt, 8192)
 }
 
+pub struct GlassdoorReviewData {
+    pub rating: f64,
+    pub title: String,
+    pub pros: String,
+    pub cons: String,
+    pub sentiment: String, // "positive", "negative", "neutral"
+    pub review_date: String,
+}
+
+pub struct GlassdoorResearch {
+    pub reviews: Vec<GlassdoorReviewData>,
+}
+
+pub fn research_glassdoor(
+    provider: &dyn AIProvider,
+    employer_name: &str,
+) -> Result<GlassdoorResearch> {
+    let prompt = format!(
+        "Research what employees say about working at \"{employer_name}\" on Glassdoor and similar \
+        review sites. Based on your knowledge, generate 5-8 representative employee reviews that \
+        reflect the actual reputation and common themes for this company.\n\n\
+        For EACH review, return a line in this EXACT format:\n\
+        REVIEW: <rating 1.0-5.0> | <sentiment: positive/negative/neutral> | <date YYYY-MM-DD> | <short title> | <pros> | <cons>\n\n\
+        RULES:\n\
+        - Ratings should reflect the company's actual Glassdoor reputation\n\
+        - Include a realistic mix of positive, negative, and neutral reviews\n\
+        - Pros and cons should be specific to this company, not generic\n\
+        - Dates should be recent (2025-2026)\n\
+        - Each field separated by \" | \" (space-pipe-space)\n\
+        - If you don't know anything about this company, return exactly: UNKNOWN\n\n\
+        Return ONLY REVIEW: lines (or UNKNOWN), nothing else."
+    );
+
+    let response = provider.complete(&prompt, 4096)?;
+
+    let trimmed = response.trim();
+    if trimmed == "UNKNOWN" || trimmed.is_empty() {
+        return Err(anyhow!("No Glassdoor data available for '{}'", employer_name));
+    }
+
+    let mut reviews = Vec::new();
+
+    for line in response.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("REVIEW:") else { continue };
+        let parts: Vec<&str> = rest.split(" | ").map(|s| s.trim()).collect();
+        if parts.len() < 6 {
+            continue;
+        }
+
+        let rating = parts[0].parse::<f64>().unwrap_or(3.0).clamp(1.0, 5.0);
+        let sentiment = match parts[1] {
+            "positive" | "negative" | "neutral" => parts[1].to_string(),
+            _ => {
+                if rating >= 4.0 { "positive".to_string() }
+                else if rating <= 2.0 { "negative".to_string() }
+                else { "neutral".to_string() }
+            }
+        };
+        let review_date = parts[2].to_string();
+        let title = parts[3].to_string();
+        let pros = parts[4].to_string();
+        let cons = parts[5].to_string();
+
+        reviews.push(GlassdoorReviewData {
+            rating,
+            title,
+            pros,
+            cons,
+            sentiment,
+            review_date,
+        });
+    }
+
+    if reviews.is_empty() {
+        return Err(anyhow!("Could not parse Glassdoor reviews for '{}'", employer_name));
+    }
+
+    Ok(GlassdoorResearch { reviews })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
