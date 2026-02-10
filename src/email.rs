@@ -64,18 +64,23 @@ impl EmailIngester {
         Self { config }
     }
 
-    pub fn fetch_job_alerts(&self, db: &Database, days: u32, dry_run: bool) -> Result<IngestStats> {
+    pub fn fetch_job_alerts(&self, db: &Database, days: u32, dry_run: bool, verbose: bool) -> Result<IngestStats> {
         let tls = native_tls::TlsConnector::builder().build()?;
-        let timeout = std::time::Duration::from_secs(30);
+        let timeout = std::time::Duration::from_secs(120);
 
         let server = self.config.server.clone();
         let port = self.config.port;
+        if verbose {
+            eprintln!("  [verbose] Timeout: {}s", timeout.as_secs());
+            eprintln!("  [verbose] Server: {}:{}", server, port);
+        }
         let (tcp, tls_stream) = spin("Connecting...", || -> Result<_> {
             let tcp = std::net::TcpStream::connect((server.as_str(), port))
-                .context("Failed to connect to IMAP server")?;
+                .context("TCP connection failed — check network/firewall")?;
             tcp.set_read_timeout(Some(timeout))?;
             tcp.set_write_timeout(Some(timeout))?;
-            let tls_stream = tls.connect(&server, tcp.try_clone()?)?;
+            let tls_stream = tls.connect(&server, tcp.try_clone()?)
+                .context("TLS handshake failed")?;
             Ok((tcp, tls_stream))
         })?;
         let _ = tcp; // keep tcp alive
@@ -84,13 +89,30 @@ impl EmailIngester {
         let client = imap::Client::new(tls_stream);
         let username = self.config.username.clone();
         let password = self.config.password.clone();
+        if verbose {
+            eprintln!("  [verbose] Authenticating as: {}", username);
+        }
         let mut session = spin("Logging in...", || {
             client.login(&username, &password)
-                .map_err(|e| anyhow!("Login failed: {}", e.0))
+                .map_err(|e| {
+                    let msg = e.0.to_string();
+                    if msg.contains("os error 11") || msg.contains("temporarily unavailable") {
+                        anyhow!("Login timed out after {}s (server not responding). \
+                                 Try again or check credentials.\n  Raw error: {}", timeout.as_secs(), msg)
+                    } else if msg.contains("Invalid credentials") || msg.contains("AUTHENTICATIONFAILED") {
+                        anyhow!("Authentication failed — bad username or app password.\n  Raw error: {}", msg)
+                    } else {
+                        anyhow!("Login failed: {}", msg)
+                    }
+                })
         })?;
         eprintln!(" ok");
 
-        spin("Selecting INBOX...", || session.select("INBOX"))?;
+        if verbose {
+            eprintln!("  [verbose] Login successful, selecting INBOX");
+        }
+        spin("Selecting INBOX...", || session.select("INBOX"))
+            .context("Failed to select INBOX")?;
         eprintln!(" ok");
 
         let since_date = chrono::Utc::now() - chrono::Duration::days(days as i64);
@@ -106,6 +128,9 @@ impl EmailIngester {
         let mut seen_message_ids: HashSet<String> = HashSet::new();
 
         for (label, query) in &search_queries {
+            if verbose {
+                eprintln!("  [verbose] IMAP SEARCH: {}", query);
+            }
             let query_clone = query.clone();
             let message_ids = spin(&format!("Searching {}...", label), || {
                 session.search(&query_clone)
@@ -113,7 +138,15 @@ impl EmailIngester {
             let message_ids = match message_ids {
                 Ok(ids) => ids,
                 Err(e) => {
-                    eprintln!(" failed: {}", e);
+                    let msg = e.to_string();
+                    if msg.contains("os error 11") || msg.contains("temporarily unavailable") {
+                        eprintln!(" timed out (server too slow)");
+                    } else {
+                        eprintln!(" failed: {}", msg);
+                    }
+                    if verbose {
+                        eprintln!("  [verbose] Search error detail: {:?}", e);
+                    }
                     continue;
                 }
             };
@@ -130,7 +163,25 @@ impl EmailIngester {
             for id in new_ids {
                 stats.emails_found += 1;
 
-                let messages = session.fetch(id.to_string(), "RFC822")?;
+                if verbose {
+                    eprintln!("  [verbose] Fetching message ID {}", id);
+                }
+                let messages = match session.fetch(id.to_string(), "RFC822") {
+                    Ok(msgs) => msgs,
+                    Err(e) => {
+                        stats.errors += 1;
+                        let msg = e.to_string();
+                        if msg.contains("os error 11") || msg.contains("temporarily unavailable") {
+                            eprintln!("\n    Error fetching message {}: timed out", id);
+                        } else {
+                            eprintln!("\n    Error fetching message {}: {}", id, msg);
+                        }
+                        if verbose {
+                            eprintln!("  [verbose] Fetch error detail: {:?}", e);
+                        }
+                        continue;
+                    }
+                };
                 for message in messages.iter() {
                     if let Some(body) = message.body() {
                         match self.process_email(body, db, dry_run) {
@@ -163,6 +214,9 @@ impl EmailIngester {
                             Err(e) => {
                                 stats.errors += 1;
                                 eprintln!("\n    Error processing email: {}", e);
+                                if verbose {
+                                    eprintln!("  [verbose] Processing error detail: {:?}", e);
+                                }
                             }
                         }
                     }

@@ -81,6 +81,10 @@ enum Commands {
         /// Dry run - show what would be added without adding
         #[arg(long)]
         dry_run: bool,
+
+        /// Verbose logging (show IMAP commands, timing, error details)
+        #[arg(short, long)]
+        verbose: bool,
     },
 
     /// Manage resumes
@@ -1112,6 +1116,7 @@ fn main() -> Result<()> {
             password_file,
             days,
             dry_run,
+            verbose,
         } => {
             db.ensure_initialized()?;
 
@@ -1128,7 +1133,7 @@ fn main() -> Result<()> {
             let ingester = EmailIngester::new(config);
 
             println!("Searching for job alerts from the last {} days...", days);
-            let stats = ingester.fetch_job_alerts(&db, days, dry_run)?;
+            let stats = ingester.fetch_job_alerts(&db, days, dry_run, verbose)?;
 
             println!("\nResults:");
             println!("  Emails processed: {}", stats.emails_found);
@@ -2060,7 +2065,7 @@ fn main() -> Result<()> {
                 Ok(config) => {
                     let ingester = EmailIngester::new(config);
                     println!("Searching for job alerts from the last {} days...", days);
-                    match ingester.fetch_job_alerts(&db, days, false) {
+                    match ingester.fetch_job_alerts(&db, days, false, false) {
                         Ok(stats) => {
                             println!("  Emails processed: {}", stats.emails_found);
                             println!("  Jobs added:       {}", stats.jobs_added);
