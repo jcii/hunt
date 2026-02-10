@@ -3,9 +3,33 @@ use mailparse::{parse_mail, MailHeaderMap};
 use scraper::{Html, Selector};
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::db::{Database, extract_pay_range};
+
+/// Run a blocking operation while printing dots to stderr every second.
+fn spin<T, F: FnOnce() -> T>(label: &str, f: F) -> T {
+    eprint!("  {} ", label);
+    let _ = std::io::stderr().flush();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop2 = stop.clone();
+    let handle = std::thread::spawn(move || {
+        while !stop2.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            if !stop2.load(Ordering::Relaxed) {
+                eprint!(".");
+                let _ = std::io::stderr().flush();
+            }
+        }
+    });
+    let result = f();
+    stop.store(true, Ordering::Relaxed);
+    let _ = handle.join();
+    result
+}
 
 pub struct EmailConfig {
     pub server: String,
@@ -42,20 +66,32 @@ impl EmailIngester {
 
     pub fn fetch_job_alerts(&self, db: &Database, days: u32, dry_run: bool) -> Result<IngestStats> {
         let tls = native_tls::TlsConnector::builder().build()?;
+        let timeout = std::time::Duration::from_secs(30);
 
-        let addr = (self.config.server.as_str(), self.config.port);
-        let tcp = std::net::TcpStream::connect(addr)
-            .context("Failed to connect to IMAP server")?;
-        tcp.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
-        tcp.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
-        let tls_stream = tls.connect(&self.config.server, tcp)?;
+        let server = self.config.server.clone();
+        let port = self.config.port;
+        let (tcp, tls_stream) = spin("Connecting...", || -> Result<_> {
+            let tcp = std::net::TcpStream::connect((server.as_str(), port))
+                .context("Failed to connect to IMAP server")?;
+            tcp.set_read_timeout(Some(timeout))?;
+            tcp.set_write_timeout(Some(timeout))?;
+            let tls_stream = tls.connect(&server, tcp.try_clone()?)?;
+            Ok((tcp, tls_stream))
+        })?;
+        let _ = tcp; // keep tcp alive
+        eprintln!(" ok");
 
         let client = imap::Client::new(tls_stream);
-        let mut session = client
-            .login(&self.config.username, &self.config.password)
-            .map_err(|e| anyhow!("Login failed: {}", e.0))?;
+        let username = self.config.username.clone();
+        let password = self.config.password.clone();
+        let mut session = spin("Logging in...", || {
+            client.login(&username, &password)
+                .map_err(|e| anyhow!("Login failed: {}", e.0))
+        })?;
+        eprintln!(" ok");
 
-        session.select("INBOX")?;
+        spin("Selecting INBOX...", || session.select("INBOX"))?;
+        eprintln!(" ok");
 
         let since_date = chrono::Utc::now() - chrono::Duration::days(days as i64);
         let date_str = since_date.format("%d-%b-%Y").to_string();
@@ -70,11 +106,14 @@ impl EmailIngester {
         let mut seen_message_ids: HashSet<String> = HashSet::new();
 
         for (label, query) in &search_queries {
-            eprint!("  {} ... ", label);
-            let message_ids = match session.search(query) {
+            let query_clone = query.clone();
+            let message_ids = spin(&format!("Searching {}...", label), || {
+                session.search(&query_clone)
+            });
+            let message_ids = match message_ids {
                 Ok(ids) => ids,
                 Err(e) => {
-                    eprintln!("failed: {}", e);
+                    eprintln!(" failed: {}", e);
                     continue;
                 }
             };
@@ -82,10 +121,18 @@ impl EmailIngester {
             let new_ids: Vec<_> = message_ids.iter()
                 .filter(|id| seen_message_ids.insert(id.to_string()))
                 .collect();
-            eprintln!("{} emails", new_ids.len());
+            eprintln!(" {} emails", new_ids.len());
 
+            if new_ids.is_empty() {
+                continue;
+            }
+
+            eprint!("    Fetching");
+            let _ = std::io::stderr().flush();
             for id in new_ids {
                 stats.emails_found += 1;
+                eprint!(".");
+                let _ = std::io::stderr().flush();
 
                 let messages = session.fetch(id.to_string(), "RFC822")?;
                 for message in messages.iter() {
@@ -96,12 +143,15 @@ impl EmailIngester {
                             }
                             Err(e) => {
                                 stats.errors += 1;
-                                eprintln!("  Error processing email: {}", e);
+                                eprintln!("\n    Error processing email: {}", e);
+                                eprint!("    Fetching");
+                                let _ = std::io::stderr().flush();
                             }
                         }
                     }
                 }
             }
+            eprintln!(" done");
         }
 
         session.logout()?;
