@@ -1672,6 +1672,9 @@ fn main() -> Result<()> {
                                 match db.update_job_description(job.id, &job_desc.text,
                                                                job_desc.pay_min, job_desc.pay_max) {
                                     Ok(_) => {
+                                        if let Some(ref emp_name) = job_desc.employer_name {
+                                            let _ = db.update_job_employer(job.id, emp_name);
+                                        }
                                         if job_desc.no_longer_accepting {
                                             let _ = db.update_job_status(job.id, "closed");
                                             println!("⚠ No longer accepting applications — marked as closed");
@@ -1749,6 +1752,11 @@ fn main() -> Result<()> {
 
                     // Update job with description and pay info
                     db.update_job_description(job_id, &job_desc.text, job_desc.pay_min, job_desc.pay_max)?;
+
+                    if let Some(ref emp_name) = job_desc.employer_name {
+                        db.update_job_employer(job_id, emp_name)?;
+                        println!("✓ Employer updated: {}", emp_name);
+                    }
 
                     if job_desc.no_longer_accepting {
                         db.update_job_status(job_id, "closed")?;
@@ -2085,6 +2093,9 @@ fn main() -> Result<()> {
                         match fetch_job_description(url, headless) {
                             Ok(desc) => {
                                 let _ = db.update_job_description(job.id, &desc.text, desc.pay_min, desc.pay_max);
+                                if let Some(ref emp_name) = desc.employer_name {
+                                    let _ = db.update_job_employer(job.id, emp_name);
+                                }
                                 if desc.no_longer_accepting {
                                     let _ = db.update_job_status(job.id, "closed");
                                 }

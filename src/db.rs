@@ -1038,6 +1038,16 @@ impl Database {
         Ok(job_id)
     }
 
+    /// Update the employer for a job (find or create the employer, then update the FK)
+    pub fn update_job_employer(&self, job_id: i64, employer_name: &str) -> Result<()> {
+        let employer_id = self.get_or_create_employer(employer_name)?;
+        self.conn.execute(
+            "UPDATE jobs SET employer_id = ?1, updated_at = datetime('now') WHERE id = ?2",
+            params![employer_id, job_id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_job_description(&self, job_id: i64, description: &str, pay_min: Option<i64>, pay_max: Option<i64>) -> Result<()> {
         self.conn.execute(
             "UPDATE jobs

@@ -8,6 +8,7 @@ pub struct JobDescription {
     pub pay_min: Option<i64>,
     pub pay_max: Option<i64>,
     pub no_longer_accepting: bool,
+    pub employer_name: Option<String>,
 }
 
 pub struct JobFetcher {
@@ -87,6 +88,12 @@ impl JobFetcher {
             println!("✓ Authenticated");
         }
 
+        // Extract employer name from the page
+        let employer_name = self.extract_employer_name().await;
+        if let Some(ref name) = employer_name {
+            println!("✓ Employer: {}", name);
+        }
+
         // Check if job is no longer accepting applications
         let no_longer_accepting = if let Ok(body) = self.driver.find(By::Tag("body")).await {
             if let Ok(text) = body.text().await {
@@ -159,11 +166,14 @@ impl JobFetcher {
                             if pay_min.is_some() || pay_max.is_some() {
                                 println!("✓ Parsed pay range: ${:?} - ${:?}", pay_min, pay_max);
                             }
+                            let emp = employer_name.clone()
+                                .or_else(|| Self::extract_employer_from_text(&cleaned));
                             return Ok(JobDescription {
                                 text: cleaned,
                                 pay_min,
                                 pay_max,
                                 no_longer_accepting,
+                                employer_name: emp,
                             });
                         }
                     }
@@ -182,11 +192,14 @@ impl JobFetcher {
                     if pay_min.is_some() || pay_max.is_some() {
                         println!("✓ Parsed pay range: ${:?} - ${:?}", pay_min, pay_max);
                     }
+                    let emp = employer_name.clone()
+                        .or_else(|| Self::extract_employer_from_text(&cleaned));
                     return Ok(JobDescription {
                         text: cleaned,
                         pay_min,
                         pay_max,
                         no_longer_accepting,
+                        employer_name: emp,
                     });
                 }
             }
@@ -202,17 +215,78 @@ impl JobFetcher {
                     if pay_min.is_some() || pay_max.is_some() {
                         println!("✓ Parsed pay range: ${:?} - ${:?}", pay_min, pay_max);
                     }
+                    let emp = employer_name.clone()
+                        .or_else(|| Self::extract_employer_from_text(&cleaned));
                     return Ok(JobDescription {
                         text: cleaned,
                         pay_min,
                         pay_max,
                         no_longer_accepting,
+                        employer_name: emp,
                     });
                 }
             }
         }
 
         Err(anyhow!("Could not extract any content from page"))
+    }
+
+    async fn extract_employer_name(&self) -> Option<String> {
+        // Try LinkedIn-specific selectors for company name
+        let selectors = [
+            ".job-details-jobs-unified-top-card__company-name a",
+            ".job-details-jobs-unified-top-card__company-name",
+            ".jobs-unified-top-card__company-name a",
+            ".jobs-unified-top-card__company-name",
+            ".topcard__org-name-link",
+            "a[data-tracking-control-name='public_jobs_topcard-org-name']",
+        ];
+
+        for sel in &selectors {
+            if let Ok(el) = self.driver.find(By::Css(*sel)).await {
+                if let Ok(text) = el.text().await {
+                    let name = text.trim().to_string();
+                    if !name.is_empty() && name.len() < 100 {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+
+        // Fallback: look for "Company: X" in the page text
+        if let Ok(body) = self.driver.find(By::Tag("body")).await {
+            if let Ok(text) = body.text().await {
+                return Self::extract_employer_from_text(&text);
+            }
+        }
+
+        None
+    }
+
+    pub fn extract_employer_from_text(text: &str) -> Option<String> {
+        // Look for "Company: X" or "About X" patterns
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("Company:") {
+                let name = rest.trim().to_string();
+                if !name.is_empty() && name.len() < 100 {
+                    return Some(name);
+                }
+            }
+        }
+
+        // Look for "About <Company Name>" followed by company description
+        let re = regex::Regex::new(r"(?m)^About ([A-Z][A-Za-z0-9 .&,'-]{2,50})$").ok()?;
+        if let Some(caps) = re.captures(text) {
+            let name = caps.get(1)?.as_str().trim().to_string();
+            // Filter out generic "About the job", "About this role", etc.
+            let lower = name.to_lowercase();
+            if !lower.starts_with("the ") && !lower.starts_with("this ") && !lower.starts_with("our ") {
+                return Some(name);
+            }
+        }
+
+        None
     }
 
     fn detect_no_longer_accepting(text: &str) -> bool {
