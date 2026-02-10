@@ -153,9 +153,9 @@ enum Commands {
         #[arg(long)]
         include_closed: bool,
 
-        /// Run browser in headless mode (may not work with LinkedIn auth)
+        /// Show browser window (headless by default)
         #[arg(long)]
-        headless: bool,
+        no_headless: bool,
     },
 
     /// AI-powered job analysis
@@ -238,9 +238,9 @@ enum Commands {
         #[arg(short, long, default_value = "claude-sonnet")]
         model: String,
 
-        /// Run browser in headless mode
+        /// Show browser window (headless by default)
         #[arg(long)]
-        headless: bool,
+        no_headless: bool,
 
         /// Seconds to wait between fetches
         #[arg(long, default_value_t = 5)]
@@ -1611,7 +1611,8 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Fetch { id, all, force, limit, delay, include_closed, headless } => {
+        Commands::Fetch { id, all, force, limit, delay, include_closed, no_headless } => {
+            let headless = !no_headless;
             db.ensure_initialized()?;
 
             if all {
@@ -1747,10 +1748,6 @@ fn main() -> Result<()> {
 
                 if let Some(url) = &job.url {
                     println!("Fetching job description from: {}", url);
-                    if headless {
-                        println!("Running in headless mode (may not work with LinkedIn auth)");
-                    }
-
                     // Fetch and extract description
                     let job_desc = fetch_job_description(url, headless)?;
 
@@ -2045,7 +2042,8 @@ fn main() -> Result<()> {
             tui::run_browse(&db, status.as_deref(), employer.as_deref())?;
         }
 
-        Commands::Refresh { username, password_file, days, model, headless, delay } => {
+        Commands::Refresh { username, password_file, days, model, no_headless, delay } => {
+            let headless = !no_headless;
             db.ensure_initialized()?;
 
             // Step 1: Email ingestion
