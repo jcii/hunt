@@ -42,50 +42,49 @@ impl EmailIngester {
 
     pub fn fetch_job_alerts(&self, db: &Database, days: u32, dry_run: bool) -> Result<IngestStats> {
         let tls = native_tls::TlsConnector::builder().build()?;
-        let client = imap::connect(
-            (self.config.server.as_str(), self.config.port),
-            &self.config.server,
-            &tls,
-        )?;
 
+        let addr = (self.config.server.as_str(), self.config.port);
+        let tcp = std::net::TcpStream::connect(addr)
+            .context("Failed to connect to IMAP server")?;
+        tcp.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+        tcp.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
+        let tls_stream = tls.connect(&self.config.server, tcp)?;
+
+        let client = imap::Client::new(tls_stream);
         let mut session = client
             .login(&self.config.username, &self.config.password)
             .map_err(|e| anyhow!("Login failed: {}", e.0))?;
 
-        // Select inbox
         session.select("INBOX")?;
 
-        // Search for job alert emails from the last N days
         let since_date = chrono::Utc::now() - chrono::Duration::days(days as i64);
         let date_str = since_date.format("%d-%b-%Y").to_string();
 
-        // Search for LinkedIn and Indeed job alerts
         let search_queries = vec![
-            format!("FROM \"jobs-noreply@linkedin.com\" SINCE {}", date_str),
-            format!("FROM \"linkedin.com\" SUBJECT \"job\" SINCE {}", date_str),
-            format!("FROM \"indeed.com\" SINCE {}", date_str),
-            format!("FROM \"alert\" SUBJECT \"job\" SINCE {}", date_str),
+            ("LinkedIn alerts", format!("FROM \"jobs-noreply@linkedin.com\" SINCE {}", date_str)),
+            ("LinkedIn jobs", format!("FROM \"linkedin.com\" SUBJECT \"job\" SINCE {}", date_str)),
+            ("Indeed", format!("FROM \"indeed.com\" SINCE {}", date_str)),
         ];
 
         let mut stats = IngestStats::default();
         let mut seen_message_ids: HashSet<String> = HashSet::new();
 
-        for query in &search_queries {
+        for (label, query) in &search_queries {
+            eprint!("  {} ... ", label);
             let message_ids = match session.search(query) {
                 Ok(ids) => ids,
                 Err(e) => {
-                    eprintln!("Search query failed: {} - {}", query, e);
+                    eprintln!("failed: {}", e);
                     continue;
                 }
             };
 
-            for id in message_ids.iter() {
-                let id_str = id.to_string();
-                if seen_message_ids.contains(&id_str) {
-                    continue;
-                }
-                seen_message_ids.insert(id_str);
+            let new_ids: Vec<_> = message_ids.iter()
+                .filter(|id| seen_message_ids.insert(id.to_string()))
+                .collect();
+            eprintln!("{} emails", new_ids.len());
 
+            for id in new_ids {
                 stats.emails_found += 1;
 
                 let messages = session.fetch(id.to_string(), "RFC822")?;
@@ -97,7 +96,7 @@ impl EmailIngester {
                             }
                             Err(e) => {
                                 stats.errors += 1;
-                                eprintln!("Error processing email: {}", e);
+                                eprintln!("  Error processing email: {}", e);
                             }
                         }
                     }
