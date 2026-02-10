@@ -1127,10 +1127,11 @@ fn main() -> Result<()> {
             let stats = ingester.fetch_job_alerts(&db, days, dry_run)?;
 
             println!("\nResults:");
-            println!("  Emails found: {}", stats.emails_found);
-            println!("  Jobs added:   {}", stats.jobs_added);
+            println!("  Emails processed: {}", stats.emails_found);
+            println!("  Jobs added:       {}", stats.jobs_added);
+            println!("  Duplicates:       {}", stats.duplicates);
             if stats.errors > 0 {
-                println!("  Errors:       {}", stats.errors);
+                println!("  Errors:           {}", stats.errors);
             }
 
             if dry_run {
@@ -2051,10 +2052,11 @@ fn main() -> Result<()> {
                     println!("Searching for job alerts from the last {} days...", days);
                     match ingester.fetch_job_alerts(&db, days, false) {
                         Ok(stats) => {
-                            println!("  Emails found: {}", stats.emails_found);
-                            println!("  Jobs added:   {}", stats.jobs_added);
+                            println!("  Emails processed: {}", stats.emails_found);
+                            println!("  Jobs added:       {}", stats.jobs_added);
+                            println!("  Duplicates:       {}", stats.duplicates);
                             if stats.errors > 0 {
-                                println!("  Errors:       {}", stats.errors);
+                                println!("  Errors:           {}", stats.errors);
                             }
                         }
                         Err(e) => println!("  Email fetch failed: {}", e),

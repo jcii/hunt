@@ -127,82 +127,114 @@ impl EmailIngester {
                 continue;
             }
 
-            eprint!("    Fetching");
-            let _ = std::io::stderr().flush();
             for id in new_ids {
                 stats.emails_found += 1;
-                eprint!(".");
-                let _ = std::io::stderr().flush();
 
                 let messages = session.fetch(id.to_string(), "RFC822")?;
                 for message in messages.iter() {
                     if let Some(body) = message.body() {
                         match self.process_email(body, db, dry_run) {
-                            Ok(jobs_added) => {
-                                stats.jobs_added += jobs_added;
+                            Ok(result) => {
+                                // Print email header
+                                eprintln!("\n    {} | {} | {}",
+                                    &result.date,
+                                    &result.from,
+                                    &result.subject,
+                                );
+
+                                if result.jobs_found.is_empty() {
+                                    eprintln!("      (no jobs parsed from this email)");
+                                }
+
+                                for jr in &result.jobs_found {
+                                    let tag = match jr.status {
+                                        JobResultStatus::Added => "+ADD",
+                                        JobResultStatus::Duplicate => " DUP",
+                                        JobResultStatus::DryRun => " DRY",
+                                    };
+                                    eprintln!("      [{}] {} at {}", tag, jr.title, jr.employer);
+                                    match jr.status {
+                                        JobResultStatus::Added => stats.jobs_added += 1,
+                                        JobResultStatus::Duplicate => stats.duplicates += 1,
+                                        JobResultStatus::DryRun => {}
+                                    }
+                                }
                             }
                             Err(e) => {
                                 stats.errors += 1;
                                 eprintln!("\n    Error processing email: {}", e);
-                                eprint!("    Fetching");
-                                let _ = std::io::stderr().flush();
                             }
                         }
                     }
                 }
             }
-            eprintln!(" done");
         }
 
         session.logout()?;
         Ok(stats)
     }
 
-    fn process_email(&self, raw: &[u8], db: &Database, dry_run: bool) -> Result<usize> {
+    fn process_email(&self, raw: &[u8], db: &Database, dry_run: bool) -> Result<EmailResult> {
         let parsed = parse_mail(raw)?;
 
         let from = parsed
             .headers
             .get_first_value("From")
-            .unwrap_or_default()
-            .to_lowercase();
+            .unwrap_or_default();
         let subject = parsed
             .headers
             .get_first_value("Subject")
             .unwrap_or_default();
+        let date = parsed
+            .headers
+            .get_first_value("Date")
+            .unwrap_or_default();
+
+        let from_lower = from.to_lowercase();
 
         // Get email body (prefer HTML)
         let body = get_email_body(&parsed)?;
 
         // Determine source and parse accordingly
-        let jobs = if from.contains("linkedin.com") {
+        let jobs = if from_lower.contains("linkedin.com") {
             parse_linkedin_email(&subject, &body)?
-        } else if from.contains("indeed.com") {
+        } else if from_lower.contains("indeed.com") {
             parse_indeed_email(&subject, &body)?
         } else {
-            // Generic parsing
             parse_generic_job_email(&subject, &body)?
         };
 
-        let mut added = 0;
+        let mut job_results = Vec::new();
         for job in jobs {
+            let employer = job.employer.as_deref().unwrap_or("?").to_string();
             if dry_run {
-                println!(
-                    "[DRY RUN] Would add: {} at {} ({})",
-                    job.title,
-                    job.employer.as_deref().unwrap_or("Unknown"),
-                    job.source
-                );
+                job_results.push(JobResult {
+                    title: job.title.clone(),
+                    employer,
+                    status: JobResultStatus::DryRun,
+                });
+            } else if job_exists(db, &job)? {
+                job_results.push(JobResult {
+                    title: job.title.clone(),
+                    employer,
+                    status: JobResultStatus::Duplicate,
+                });
             } else {
-                // Check for duplicates by URL or title+employer
-                if !job_exists(db, &job)? {
-                    add_job_from_email(db, &job)?;
-                    added += 1;
-                }
+                add_job_from_email(db, &job)?;
+                job_results.push(JobResult {
+                    title: job.title.clone(),
+                    employer,
+                    status: JobResultStatus::Added,
+                });
             }
         }
 
-        Ok(added)
+        Ok(EmailResult {
+            subject,
+            date,
+            from,
+            jobs_found: job_results,
+        })
     }
 }
 
@@ -602,7 +634,30 @@ fn add_job_from_email(db: &Database, job: &ParsedJob) -> Result<i64> {
 pub struct IngestStats {
     pub emails_found: usize,
     pub jobs_added: usize,
+    pub duplicates: usize,
     pub errors: usize,
+}
+
+#[derive(Debug)]
+pub struct EmailResult {
+    pub subject: String,
+    pub date: String,
+    pub from: String,
+    pub jobs_found: Vec<JobResult>,
+}
+
+#[derive(Debug)]
+pub struct JobResult {
+    pub title: String,
+    pub employer: String,
+    pub status: JobResultStatus,
+}
+
+#[derive(Debug)]
+pub enum JobResultStatus {
+    Added,
+    Duplicate,
+    DryRun,
 }
 
 #[cfg(test)]
