@@ -149,6 +149,10 @@ enum Commands {
         #[arg(long, default_value_t = 5)]
         delay: u64,
 
+        /// Include closed jobs (skipped by default)
+        #[arg(long)]
+        include_closed: bool,
+
         /// Run browser in headless mode (may not work with LinkedIn auth)
         #[arg(long)]
         headless: bool,
@@ -1607,12 +1611,12 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Fetch { id, all, force, limit, delay, headless } => {
+        Commands::Fetch { id, all, force, limit, delay, include_closed, headless } => {
             db.ensure_initialized()?;
 
             if all {
                 // Fetch all jobs (with or without descriptions based on --force)
-                let jobs = db.get_jobs_to_fetch(limit, force)?;
+                let jobs = db.get_jobs_to_fetch(limit, force, include_closed)?;
 
                 if jobs.is_empty() {
                     if force {
@@ -2075,7 +2079,7 @@ fn main() -> Result<()> {
 
             // Step 2: Fetch job descriptions
             println!("\n═══ Step 2: Fetching job descriptions ═══\n");
-            let jobs_to_fetch = db.get_jobs_to_fetch(None, false)?;
+            let jobs_to_fetch = db.get_jobs_to_fetch(None, false, false)?;
             if jobs_to_fetch.is_empty() {
                 println!("All jobs already have descriptions.");
             } else {

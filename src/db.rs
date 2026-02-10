@@ -739,12 +739,16 @@ impl Database {
         }
     }
 
-    pub fn get_jobs_to_fetch(&self, limit: Option<usize>, force: bool) -> Result<Vec<Job>> {
-        let where_clause = if force {
-            "j.url IS NOT NULL"
-        } else {
-            "j.fetched_at IS NULL AND j.url IS NOT NULL"
-        };
+    pub fn get_jobs_to_fetch(&self, limit: Option<usize>, force: bool, include_closed: bool) -> Result<Vec<Job>> {
+        let mut conditions = Vec::new();
+        conditions.push("j.url IS NOT NULL".to_string());
+        if !force {
+            conditions.push("j.fetched_at IS NULL".to_string());
+        }
+        if !include_closed {
+            conditions.push("j.status != 'closed'".to_string());
+        }
+        let where_clause = conditions.join(" AND ");
 
         let query = if let Some(lim) = limit {
             format!(
