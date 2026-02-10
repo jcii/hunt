@@ -13,6 +13,7 @@ pub struct JobDescription {
 
 pub struct JobFetcher {
     driver: WebDriver,
+    _geckodriver: Option<std::process::Child>,
 }
 
 impl JobFetcher {
@@ -49,22 +50,47 @@ impl JobFetcher {
             caps.set_headless()?;
         }
 
-        println!("Starting geckodriver...");
+        // Auto-start geckodriver if not already running
+        let geckodriver_child = Self::ensure_geckodriver_running().await?;
 
         // Connect to geckodriver
-        // thirtyfour expects geckodriver to be running separately
-        // We'll use the default geckodriver URL
         let driver = WebDriver::new("http://localhost:4444", caps)
             .await
-            .context("Failed to connect to geckodriver. Make sure geckodriver is running.\n\
-                     You can start it with: geckodriver --port 4444")?;
+            .context("Failed to connect to geckodriver after starting it")?;
 
         // Minimize to avoid stealing focus during automated fetches
         if !headless {
             let _ = driver.minimize_window().await;
         }
 
-        Ok(JobFetcher { driver })
+        Ok(JobFetcher { driver, _geckodriver: geckodriver_child })
+    }
+
+    async fn ensure_geckodriver_running() -> Result<Option<std::process::Child>> {
+        // Check if geckodriver is already listening on port 4444
+        if std::net::TcpStream::connect("127.0.0.1:4444").is_ok() {
+            println!("Using existing geckodriver on port 4444");
+            return Ok(None);
+        }
+
+        println!("Starting geckodriver...");
+        let child = Command::new("geckodriver")
+            .arg("--port")
+            .arg("4444")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .context("Failed to start geckodriver. Install it or start manually: geckodriver --port 4444")?;
+
+        // Wait for it to be ready (up to 5 seconds)
+        for _ in 0..50 {
+            if std::net::TcpStream::connect("127.0.0.1:4444").is_ok() {
+                return Ok(Some(child));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        Err(anyhow!("geckodriver started but not responding on port 4444 after 5s"))
     }
 
     pub async fn fetch_job_description(&self, url: &str) -> Result<JobDescription> {
