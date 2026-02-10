@@ -23,14 +23,14 @@ struct AppState {
     keyword_model: Option<String>,
     search_active: bool,
     search_query: String,
+    hide_closed: bool,
 }
 
 impl AppState {
     fn new(jobs: Vec<Job>) -> Self {
-        let visible: Vec<usize> = (0..jobs.len()).collect();
-        Self {
+        let mut s = Self {
+            visible: Vec::new(),
             jobs,
-            visible,
             selected: 0,
             scroll_offset: 0,
             keywords: Vec::new(),
@@ -38,7 +38,10 @@ impl AppState {
             keyword_model: None,
             search_active: false,
             search_query: String::new(),
-        }
+            hide_closed: true,
+        };
+        s.update_filter();
+        s
     }
 
     fn current_job(&self) -> Option<&Job> {
@@ -60,18 +63,20 @@ impl AppState {
     }
 
     fn update_filter(&mut self) {
-        if self.search_query.is_empty() {
-            self.visible = (0..self.jobs.len()).collect();
-        } else {
-            let query = self.search_query.to_lowercase();
-            self.visible = self.jobs.iter().enumerate()
-                .filter(|(_, job)| {
-                    job.title.to_lowercase().contains(&query)
-                        || job.employer_name.as_deref().unwrap_or("").to_lowercase().contains(&query)
-                })
-                .map(|(i, _)| i)
-                .collect();
-        }
+        let query = self.search_query.to_lowercase();
+        self.visible = self.jobs.iter().enumerate()
+            .filter(|(_, job)| {
+                if self.hide_closed && job.status == "closed" {
+                    return false;
+                }
+                if !query.is_empty() {
+                    return job.title.to_lowercase().contains(&query)
+                        || job.employer_name.as_deref().unwrap_or("").to_lowercase().contains(&query);
+                }
+                true
+            })
+            .map(|(i, _)| i)
+            .collect();
         if self.visible.is_empty() {
             self.selected = 0;
         } else {
@@ -238,6 +243,12 @@ fn run_loop(
                 KeyCode::Char('a') => state.update_current_job_status(db, "applied"),
                 KeyCode::Char('x') => state.update_current_job_status(db, "rejected"),
                 KeyCode::Char('c') => state.update_current_job_status(db, "closed"),
+                KeyCode::Char('H') => {
+                    state.hide_closed = !state.hide_closed;
+                    state.update_filter();
+                    list_state.select(Some(state.selected));
+                    state.load_keywords(db);
+                }
                 _ => {}
             }
             if state.selected != prev_selected {
@@ -313,6 +324,8 @@ fn draw(frame: &mut Frame, state: &AppState, list_state: &mut ListState) {
 
     let list_title = if !state.search_query.is_empty() {
         format!(" Jobs ({}/{}) \"{}\" ", state.visible.len(), state.jobs.len(), state.search_query)
+    } else if state.visible.len() < state.jobs.len() {
+        format!(" Jobs ({}/{}) ", state.visible.len(), state.jobs.len())
     } else {
         format!(" Jobs ({}) ", state.jobs.len())
     };
@@ -337,7 +350,8 @@ fn draw(frame: &mut Frame, state: &AppState, list_state: &mut ListState) {
     let footer_text = if state.search_active {
         format!("/{}", state.search_query)
     } else {
-        " j/k:nav  ^D/^U:page  g/G:top/end  /:search  J/K:scroll  n/r/a/x/c:status  q:quit".to_string()
+        format!(" j/k:nav  ^D/^U:page  g/G:top/end  /:search  J/K:scroll  n/r/a/x/c:status  H:{}  q:quit",
+            if state.hide_closed { "show closed" } else { "hide closed" })
     };
     let footer_style = if state.search_active {
         Style::default().fg(Color::Yellow)
