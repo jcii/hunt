@@ -120,6 +120,7 @@ impl EmailIngester {
 
         let search_queries = vec![
             ("LinkedIn alerts", format!("FROM \"jobs-noreply@linkedin.com\" SINCE {}", date_str)),
+            ("LinkedIn job alerts", format!("FROM \"jobalerts-noreply@linkedin.com\" SINCE {}", date_str)),
             ("LinkedIn jobs", format!("FROM \"linkedin.com\" SUBJECT \"job\" SINCE {}", date_str)),
             ("Indeed", format!("FROM \"indeed.com\" SINCE {}", date_str)),
         ];
