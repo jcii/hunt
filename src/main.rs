@@ -2022,6 +2022,8 @@ fn main() -> Result<()> {
                     let job_text = job.raw_text.as_ref().unwrap();
                     let title_short: String = job.title.chars().take(40).collect();
                     print!("[{}/{}] Analyzing job #{}: {}...", i + 1, total, job.id, title_short);
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
 
                     match ai::analyze_fit(provider.as_ref(), &base_resume.content, job_text, &job.title) {
                         Ok(fit) => {

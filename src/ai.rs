@@ -152,7 +152,9 @@ impl AnthropicProvider {
     pub fn new(model_id: String) -> Result<Self> {
         let api_key = env::var("ANTHROPIC_API_KEY")
             .context("ANTHROPIC_API_KEY environment variable not set. Set it with: export ANTHROPIC_API_KEY=your-key-here")?;
-        let client = reqwest::blocking::Client::new();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()?;
         Ok(Self { api_key, model_id, client })
     }
 }
@@ -320,7 +322,9 @@ impl OpenAIProvider {
     pub fn new(model_id: String) -> Result<Self> {
         let api_key = env::var("OPENAI_API_KEY")
             .context("OPENAI_API_KEY environment variable not set. Set it with: export OPENAI_API_KEY=your-key-here")?;
-        let client = reqwest::blocking::Client::new();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()?;
         Ok(Self { api_key, model_id, client })
     }
 }
