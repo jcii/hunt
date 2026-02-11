@@ -10,32 +10,43 @@ use ratatui::{
 };
 use std::io::stdout;
 
-use crate::db::Database;
-use crate::models::{Job, JobKeyword, JobKeywordProfile};
+use crate::db::{self, Database};
+use crate::models::{FitAnalysis, Job, JobKeyword, JobKeywordProfile};
 
 struct AppState {
     jobs: Vec<Job>,
-    visible: Vec<usize>, // indices into jobs matching current filter
-    selected: usize,      // index into visible
+    scores: Vec<f64>,              // ranking score per job (parallel to jobs)
+    fit_scores: Vec<Option<f64>>,  // raw fit score per job (parallel to jobs)
+    visible: Vec<usize>,           // indices into jobs matching current filter, sorted by score
+    selected: usize,               // index into visible
     scroll_offset: u16,
     keywords: Vec<JobKeyword>,
     profile: Option<JobKeywordProfile>,
     keyword_model: Option<String>,
+    fit_analysis: Option<FitAnalysis>,
     search_active: bool,
     search_query: String,
     hide_closed: bool,
 }
 
 impl AppState {
-    fn new(jobs: Vec<Job>) -> Self {
+    fn new(jobs: Vec<Job>, db: &Database) -> Self {
+        let scores: Vec<f64> = jobs.iter().map(|j| db::calculate_score(j, db)).collect();
+        let fit_scores: Vec<Option<f64>> = jobs.iter().map(|j| {
+            db.get_best_fit_score(j.id).ok().flatten()
+        }).collect();
+
         let mut s = Self {
             visible: Vec::new(),
             jobs,
+            scores,
+            fit_scores,
             selected: 0,
             scroll_offset: 0,
             keywords: Vec::new(),
             profile: None,
             keyword_model: None,
+            fit_analysis: None,
             search_active: false,
             search_query: String::new(),
             hide_closed: true,
@@ -60,6 +71,8 @@ impl AppState {
             self.keywords.clear();
             self.profile = None;
         }
+
+        self.fit_analysis = db.get_best_fit_analysis(job_id).ok().flatten();
     }
 
     fn update_filter(&mut self) {
@@ -77,6 +90,12 @@ impl AppState {
             })
             .map(|(i, _)| i)
             .collect();
+
+        // Sort visible indices by score descending
+        self.visible.sort_by(|&a, &b| {
+            self.scores[b].partial_cmp(&self.scores[a]).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
         if self.visible.is_empty() {
             self.selected = 0;
         } else {
@@ -123,6 +142,8 @@ impl AppState {
             let job_id = self.jobs[idx].id;
             let _ = db.update_job_status(job_id, status);
             self.jobs[idx].status = status.to_string();
+            // Recompute score for this job
+            self.scores[idx] = db::calculate_score(&self.jobs[idx], db);
         }
     }
 }
@@ -134,7 +155,7 @@ pub fn run_browse(db: &Database, status: Option<&str>, employer: Option<&str>) -
         return Ok(());
     }
 
-    let mut state = AppState::new(jobs);
+    let mut state = AppState::new(jobs, db);
     state.load_keywords(db);
 
     enable_raw_mode()?;
@@ -274,6 +295,15 @@ fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
+fn format_pay(job: &Job) -> String {
+    let pay = job.pay_max.or(job.pay_min);
+    match pay {
+        Some(v) if v >= 1000 => format!("${:>3}k", v / 1000),
+        Some(v) => format!("${:>4}", v),
+        None => "   - ".to_string(),
+    }
+}
+
 fn draw(frame: &mut Frame, state: &AppState, list_state: &mut ListState) {
     // Main layout: content + footer
     let main_chunks = Layout::default()
@@ -281,23 +311,25 @@ fn draw(frame: &mut Frame, state: &AppState, list_state: &mut ListState) {
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(frame.area());
 
-    // Left/right split
+    // Left/right split: 55% list / 45% detail
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(35),
-            Constraint::Percentage(65),
+            Constraint::Percentage(55),
+            Constraint::Percentage(45),
         ])
         .split(main_chunks[0]);
 
     // Compute column widths for job list
     // highlight symbol "> " = 2, borders = 2
     let usable = (chunks[0].width as usize).saturating_sub(4);
-    // Format: "S #NNNN " = 8 chars, then title + space + employer
-    let fixed = 9; // prefix(8) + gap(1)
-    let remaining = usable.saturating_sub(fixed);
+    // Format: "S #NNNN  85 $210k  Title                Employer"
+    //          1 5      3  5      variable             variable
+    // "S #NNNN SSS $NNNk " = status(1)+' '(1)+'#'(1)+id(4)+' '(1)+score(3)+' '(1)+pay(5)+' '(1) = 18
+    let prefix_w = 18;
+    let remaining = usable.saturating_sub(prefix_w);
     let emp_w = (remaining * 35 / 100).max(6).min(18);
-    let title_w = remaining.saturating_sub(emp_w);
+    let title_w = remaining.saturating_sub(emp_w + 1); // +1 for space between title and employer
 
     // Left panel: job list
     let items: Vec<ListItem> = state.visible.iter().map(|&idx| {
@@ -310,11 +342,29 @@ fn draw(frame: &mut Frame, state: &AppState, list_state: &mut ListState) {
             "closed" => "-",
             _ => "?",
         };
+
+        let score_str = match state.fit_scores[idx] {
+            Some(s) => format!("{:>3.0}", s),
+            None => "  -".to_string(),
+        };
+
+        let pay_str = format_pay(job);
         let employer = job.employer_name.as_deref().unwrap_or("?");
         let title = truncate_str(&job.title, title_w);
         let emp = truncate_str(employer, emp_w);
+
+        let score_color = match state.fit_scores[idx] {
+            Some(s) if s >= 75.0 => Color::Green,
+            Some(s) if s >= 50.0 => Color::Yellow,
+            Some(_) => Color::Red,
+            None => Color::DarkGray,
+        };
+
         ListItem::new(Line::from(vec![
-            Span::raw(format!("{} #{:<4} {:<width$}", status_icon, job.id, title, width = title_w)),
+            Span::raw(format!("{} #{:<4} ", status_icon, job.id)),
+            Span::styled(score_str, Style::default().fg(score_color)),
+            Span::styled(format!(" {} ", pay_str), Style::default().fg(Color::DarkGray)),
+            Span::raw(format!("{:<width$}", title, width = title_w)),
             Span::styled(
                 format!(" {:<width$}", emp, width = emp_w),
                 Style::default().fg(Color::DarkGray),
@@ -401,6 +451,39 @@ fn build_detail<'a>(state: &'a AppState) -> Text<'a> {
         (Some(min), None) => lines.push(Line::from(format!("Pay: ${}+", min))),
         (None, Some(max)) => lines.push(Line::from(format!("Pay: up to ${}", max))),
         (None, None) => {}
+    }
+
+    // Fit analysis summary
+    if let Some(fit) = &state.fit_analysis {
+        let score_color = if fit.fit_score >= 75.0 {
+            Color::Green
+        } else if fit.fit_score >= 50.0 {
+            Color::Yellow
+        } else {
+            Color::Red
+        };
+        lines.push(Line::from(vec![
+            Span::raw("Fit: "),
+            Span::styled(format!("{:.0}/100", fit.fit_score), Style::default().fg(score_color).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" ({})", fit.source_model), Style::default().fg(Color::DarkGray)),
+        ]));
+
+        if let Some(matches) = &fit.strong_matches {
+            if !matches.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("  + {}", matches),
+                    Style::default().fg(Color::Green),
+                )));
+            }
+        }
+        if let Some(gaps) = &fit.gaps {
+            if !gaps.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("  - {}", gaps),
+                    Style::default().fg(Color::Red),
+                )));
+            }
+        }
     }
 
     lines.push(Line::from(""));

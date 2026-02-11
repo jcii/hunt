@@ -1481,6 +1481,59 @@ impl Database {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Returns the highest fit_score across all resume+model combos for this job
+    pub fn get_best_fit_score(&self, job_id: i64) -> Result<Option<f64>> {
+        let result = self.conn.query_row(
+            "SELECT MAX(fit_score) FROM fit_analyses WHERE job_id = ?1",
+            [job_id],
+            |row| row.get::<_, Option<f64>>(0),
+        );
+        match result {
+            Ok(score) => Ok(score),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Check if a fit analysis exists for this job+resume+model combo
+    pub fn has_fit_analysis(&self, job_id: i64, base_resume_id: i64, source_model: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM fit_analyses WHERE job_id = ?1 AND base_resume_id = ?2 AND source_model = ?3",
+            params![job_id, base_resume_id, source_model],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Get the best fit analysis (highest score) for a job
+    pub fn get_best_fit_analysis(&self, job_id: i64) -> Result<Option<FitAnalysis>> {
+        let result = self.conn.query_row(
+            "SELECT id, job_id, base_resume_id, source_model, fit_score, strong_matches, gaps, stretch_areas, narrative, created_at
+             FROM fit_analyses WHERE job_id = ?1
+             ORDER BY fit_score DESC LIMIT 1",
+            [job_id],
+            |row| {
+                Ok(FitAnalysis {
+                    id: row.get(0)?,
+                    job_id: row.get(1)?,
+                    base_resume_id: row.get(2)?,
+                    source_model: row.get(3)?,
+                    fit_score: row.get(4)?,
+                    strong_matches: row.get(5)?,
+                    gaps: row.get(6)?,
+                    stretch_areas: row.get(7)?,
+                    narrative: row.get(8)?,
+                    created_at: row.get(9)?,
+                })
+            },
+        );
+        match result {
+            Ok(analysis) => Ok(Some(analysis)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     #[allow(dead_code)]
     pub fn get_fit_analysis(
         &self,
@@ -1874,7 +1927,7 @@ pub fn extract_pay_range(content: &str) -> (Option<i64>, Option<i64>) {
     (pay_min, pay_max)
 }
 
-fn calculate_score(job: &Job, db: &Database) -> f64 {
+pub fn calculate_score(job: &Job, db: &Database) -> f64 {
     let mut score = 50.0; // Base score
 
     // Pay bonus (higher pay = higher score)
@@ -1900,6 +1953,11 @@ fn calculate_score(job: &Job, db: &Database) -> f64 {
         "reviewing" => score += 10.0,
         "new" => score += 5.0,
         _ => {}
+    }
+
+    // Fit score bonus: up to +50 points based on best fit analysis
+    if let Ok(Some(fit_score)) = db.get_best_fit_score(job.id) {
+        score += fit_score * 0.5; // 0-100 fit score → 0-50 points
     }
 
     score.max(0.0)

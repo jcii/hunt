@@ -201,8 +201,9 @@ enum Commands {
 
     /// Analyze resume fit against a job posting
     Fit {
-        /// Job ID to compare against
-        job_id: i64,
+        /// Job ID to compare against (not used with --all)
+        #[arg(required_unless_present = "all")]
+        job_id: Option<i64>,
 
         /// Base resume name or ID
         #[arg(short, long)]
@@ -211,6 +212,14 @@ enum Commands {
         /// AI model to use (default: claude-sonnet)
         #[arg(short, long, default_value = "claude-sonnet")]
         model: String,
+
+        /// Run fit analysis on all jobs with descriptions
+        #[arg(long)]
+        all: bool,
+
+        /// Re-analyze even if fit analysis already exists (use with --all)
+        #[arg(long)]
+        force: bool,
     },
 
     /// Browse jobs interactively in a TUI
@@ -1973,14 +1982,8 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Fit { job_id, resume, model } => {
+        Commands::Fit { job_id, resume, model, all, force } => {
             db.ensure_initialized()?;
-            let job = db.get_job(job_id)?
-                .ok_or_else(|| anyhow!("Job #{} not found", job_id))?;
-
-            let job_text = job.raw_text
-                .as_ref()
-                .ok_or_else(|| anyhow!("Job #{} has no raw text for fit analysis", job_id))?;
 
             let base_resume = if let Ok(id) = resume.parse::<i64>() {
                 db.get_base_resume(id)?
@@ -1992,54 +1995,116 @@ fn main() -> Result<()> {
             let spec = ai::resolve_model(&model)?;
             let provider = ai::create_provider(&spec)?;
 
-            println!("Analyzing fit for job #{}: {} (model: {})...\n", job_id, job.title, spec.short_name);
+            if all {
+                // Run fit analysis on all non-closed jobs with descriptions
+                let jobs = db.list_jobs(None, None)?;
+                let candidates: Vec<&models::Job> = jobs.iter()
+                    .filter(|j| j.status != "closed" && j.status != "rejected" && j.raw_text.is_some())
+                    .collect();
 
-            let fit = ai::analyze_fit(provider.as_ref(), &base_resume.content, job_text, &job.title)?;
-
-            // Store in database
-            db.save_fit_analysis(
-                job_id,
-                base_resume.id,
-                &spec.short_name,
-                fit.fit_score,
-                &fit.strong_matches,
-                &fit.gaps,
-                &fit.stretch_areas,
-                &fit.narrative,
-            )?;
-
-            println!("=== Fit Analysis ===\n");
-            println!("Fit Score: {:.0}/100\n", fit.fit_score);
-
-            if !fit.strong_matches.is_empty() {
-                println!("Strong Matches:");
-                for item in &fit.strong_matches {
-                    println!("  + {}", item);
+                let total = candidates.len();
+                if total == 0 {
+                    println!("No jobs with descriptions found.");
+                    return Ok(());
                 }
-                println!();
-            }
 
-            if !fit.gaps.is_empty() {
-                println!("Gaps:");
-                for item in &fit.gaps {
-                    println!("  - {}", item);
+                let mut analyzed = 0;
+                let mut skipped = 0;
+                let mut errors = 0;
+
+                for (i, job) in candidates.iter().enumerate() {
+                    // Skip if already analyzed (unless --force)
+                    if !force && db.has_fit_analysis(job.id, base_resume.id, &spec.short_name)? {
+                        skipped += 1;
+                        continue;
+                    }
+
+                    let job_text = job.raw_text.as_ref().unwrap();
+                    let title_short: String = job.title.chars().take(40).collect();
+                    print!("[{}/{}] Analyzing job #{}: {}...", i + 1, total, job.id, title_short);
+
+                    match ai::analyze_fit(provider.as_ref(), &base_resume.content, job_text, &job.title) {
+                        Ok(fit) => {
+                            db.save_fit_analysis(
+                                job.id,
+                                base_resume.id,
+                                &spec.short_name,
+                                fit.fit_score,
+                                &fit.strong_matches,
+                                &fit.gaps,
+                                &fit.stretch_areas,
+                                &fit.narrative,
+                            )?;
+                            println!("  score: {:.0}", fit.fit_score);
+                            analyzed += 1;
+                        }
+                        Err(e) => {
+                            println!("  ERROR: {}", e);
+                            errors += 1;
+                        }
+                    }
                 }
-                println!();
-            }
 
-            if !fit.stretch_areas.is_empty() {
-                println!("Stretch Areas:");
-                for item in &fit.stretch_areas {
-                    println!("  ~ {}", item);
+                println!("\nDone: {} analyzed, {} skipped (existing), {} errors", analyzed, skipped, errors);
+            } else {
+                // Single job fit analysis
+                let job_id = job_id.ok_or_else(|| anyhow!("Job ID required (or use --all)"))?;
+                let job = db.get_job(job_id)?
+                    .ok_or_else(|| anyhow!("Job #{} not found", job_id))?;
+
+                let job_text = job.raw_text
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("Job #{} has no raw text for fit analysis", job_id))?;
+
+                println!("Analyzing fit for job #{}: {} (model: {})...\n", job_id, job.title, spec.short_name);
+
+                let fit = ai::analyze_fit(provider.as_ref(), &base_resume.content, job_text, &job.title)?;
+
+                // Store in database
+                db.save_fit_analysis(
+                    job_id,
+                    base_resume.id,
+                    &spec.short_name,
+                    fit.fit_score,
+                    &fit.strong_matches,
+                    &fit.gaps,
+                    &fit.stretch_areas,
+                    &fit.narrative,
+                )?;
+
+                println!("=== Fit Analysis ===\n");
+                println!("Fit Score: {:.0}/100\n", fit.fit_score);
+
+                if !fit.strong_matches.is_empty() {
+                    println!("Strong Matches:");
+                    for item in &fit.strong_matches {
+                        println!("  + {}", item);
+                    }
+                    println!();
                 }
-                println!();
-            }
 
-            if !fit.narrative.is_empty() {
-                println!("Narrative:\n{}", fit.narrative);
-            }
+                if !fit.gaps.is_empty() {
+                    println!("Gaps:");
+                    for item in &fit.gaps {
+                        println!("  - {}", item);
+                    }
+                    println!();
+                }
 
-            println!("\n(Stored in DB, model: {})", spec.short_name);
+                if !fit.stretch_areas.is_empty() {
+                    println!("Stretch Areas:");
+                    for item in &fit.stretch_areas {
+                        println!("  ~ {}", item);
+                    }
+                    println!();
+                }
+
+                if !fit.narrative.is_empty() {
+                    println!("Narrative:\n{}", fit.narrative);
+                }
+
+                println!("\n(Stored in DB, model: {})", spec.short_name);
+            }
         }
 
         Commands::Browse { status, employer } => {
