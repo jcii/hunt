@@ -69,6 +69,15 @@ jobs:
                       icon = ':green_circle:' if rate >= 80 else ':yellow_circle:' if rate >= 50 else ':red_circle:'
                       print(f'| {name} | {icon} {rate:.1f}% | {lines} |')
           " >> $GITHUB_STEP_SUMMARY
+      - name: Enforce coverage minimum
+        run: |
+          COVERAGE=$(grep -oP '\d+\.\d+% coverage' coverage/tarpaulin.log | tail -1)
+          PCT=$(echo "$COVERAGE" | grep -oP '[\d.]+')
+          if (( $(echo "$PCT < 50" | bc -l) )); then
+            echo "::error::Coverage $PCT% is below the 50% minimum"
+            exit 1
+          fi
+          echo "Coverage $PCT% meets the 50% minimum"
       - name: Upload coverage HTML report
         uses: actions/upload-artifact@v4
         with:

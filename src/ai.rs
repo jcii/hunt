@@ -850,4 +850,81 @@ mod tests {
             unsafe { env::set_var("OPENAI_API_KEY", val); }
         }
     }
+
+    #[test]
+    fn test_parse_weighted_keywords_basic() {
+        let result = parse_weighted_keywords("Kubernetes/3, Python/2, dbt/1");
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], ("Kubernetes".to_string(), 3));
+        assert_eq!(result[1], ("Python".to_string(), 2));
+        assert_eq!(result[2], ("dbt".to_string(), 1));
+    }
+
+    #[test]
+    fn test_parse_weighted_keywords_no_weight() {
+        let result = parse_weighted_keywords("Kubernetes, Python");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], ("Kubernetes".to_string(), 2));
+        assert_eq!(result[1], ("Python".to_string(), 2));
+    }
+
+    #[test]
+    fn test_parse_weighted_keywords_empty() {
+        let result = parse_weighted_keywords("");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_weighted_keywords_clamp() {
+        let result = parse_weighted_keywords("Kubernetes/5, Python/0, AWS/-10, Docker/10");
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0], ("Kubernetes".to_string(), 3));
+        assert_eq!(result[1], ("Python".to_string(), 1));
+        assert_eq!(result[2], ("AWS".to_string(), 1));
+        assert_eq!(result[3], ("Docker".to_string(), 3));
+    }
+
+    #[test]
+    fn test_parse_weighted_keywords_whitespace() {
+        let result = parse_weighted_keywords("  Kubernetes / 3 ,  Python /2  , dbt/ 1  ");
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], ("Kubernetes".to_string(), 3));
+        assert_eq!(result[1], ("Python".to_string(), 2));
+        assert_eq!(result[2], ("dbt".to_string(), 1));
+    }
+
+    #[test]
+    fn test_dedup_keywords_no_dupes() {
+        let keywords = vec![
+            ("Kubernetes".to_string(), 3),
+            ("Python".to_string(), 2),
+            ("AWS".to_string(), 1),
+        ];
+        let result = dedup_keywords(keywords);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_dedup_keywords_case_insensitive() {
+        let keywords = vec![
+            ("AWS".to_string(), 2),
+            ("aws".to_string(), 3),
+        ];
+        let result = dedup_keywords(keywords);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].1, 3);
+    }
+
+    #[test]
+    fn test_dedup_keywords_empty() {
+        let result = dedup_keywords(vec![]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_model_gpt5_pro_alias() {
+        let spec = resolve_model("gpt5-pro").unwrap();
+        assert_eq!(spec.model_id, "gpt-5.2-pro");
+        assert!(matches!(spec.provider, ProviderKind::OpenAI));
+    }
 }

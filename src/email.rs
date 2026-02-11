@@ -901,4 +901,68 @@ mod tests {
             Some("https://example.com/job".to_string())
         );
     }
+
+    #[test]
+    fn test_extract_jobs_from_text_basic() {
+        let text = "We have openings: Senior Software Engineer and DevOps Engineer positions.";
+        let result = extract_jobs_from_text(text, "test").unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_jobs_from_text_no_matches() {
+        let text = "Random text with no job titles.";
+        let result = extract_jobs_from_text(text, "test").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_extract_jobs_from_text_deduplicates() {
+        let text = "Senior Software Engineer needed. Senior Software Engineer opening. Senior Software Engineer.";
+        let result = extract_jobs_from_text(text, "test").unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_generic_job_email_html() {
+        let html = "<html><body><p>Senior DevOps Engineer and Site Reliability Engineer</p></body></html>";
+        let result = parse_generic_job_email("", html).unwrap();
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_email_config_gmail() {
+        let config = EmailConfig::gmail("user@gmail.com", "test-password");
+        assert_eq!(config.server, "imap.gmail.com");
+        assert_eq!(config.port, 993);
+        assert_eq!(config.username, "user@gmail.com");
+        assert_eq!(config.password, "test-password");
+    }
+
+    #[test]
+    fn test_email_config_trims_password() {
+        let config = EmailConfig::gmail("user@gmail.com", "test-password\n\r  ");
+        assert_eq!(config.password, "test-password");
+    }
+
+    #[test]
+    fn test_parse_title_at_company_comma_pattern() {
+        let (title, company) = parse_title_at_company("DevOps Engineer, Amazon");
+        assert_eq!(title, "DevOps Engineer");
+        assert_eq!(company, Some("Amazon".to_string()));
+    }
+
+    #[test]
+    fn test_parse_title_at_company_no_pattern() {
+        let (title, company) = parse_title_at_company("Staff DevOps Engineer");
+        assert_eq!(title, "Staff DevOps Engineer");
+        assert_eq!(company, None);
+    }
+
+    #[test]
+    fn test_parse_title_at_company_remote_comma() {
+        let (title, company) = parse_title_at_company("Senior Engineer, Remote");
+        assert_eq!(title, "Senior Engineer, Remote");
+        assert_eq!(company, None);
+    }
 }
