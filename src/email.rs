@@ -901,4 +901,531 @@ mod tests {
             Some("https://example.com/job".to_string())
         );
     }
+
+    #[test]
+    fn test_extract_jobs_from_text_basic() {
+        let text = "We have openings: Senior Software Engineer and DevOps Engineer positions.";
+        let result = extract_jobs_from_text(text, "test").unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_jobs_from_text_no_matches() {
+        let text = "Random text with no job titles.";
+        let result = extract_jobs_from_text(text, "test").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_extract_jobs_from_text_deduplicates() {
+        let text = "Senior Software Engineer needed. Senior Software Engineer opening. Senior Software Engineer.";
+        let result = extract_jobs_from_text(text, "test").unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_generic_job_email_html() {
+        let html = "<html><body><p>Senior DevOps Engineer and Site Reliability Engineer</p></body></html>";
+        let result = parse_generic_job_email("", html).unwrap();
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_email_config_gmail() {
+        let config = EmailConfig::gmail("user@gmail.com", "test-password");
+        assert_eq!(config.server, "imap.gmail.com");
+        assert_eq!(config.port, 993);
+        assert_eq!(config.username, "user@gmail.com");
+        assert_eq!(config.password, "test-password");
+    }
+
+    #[test]
+    fn test_email_config_trims_password() {
+        let config = EmailConfig::gmail("user@gmail.com", "test-password\n\r  ");
+        assert_eq!(config.password, "test-password");
+    }
+
+    #[test]
+    fn test_parse_title_at_company_comma_pattern() {
+        let (title, company) = parse_title_at_company("DevOps Engineer, Amazon");
+        assert_eq!(title, "DevOps Engineer");
+        assert_eq!(company, Some("Amazon".to_string()));
+    }
+
+    #[test]
+    fn test_parse_title_at_company_no_pattern() {
+        let (title, company) = parse_title_at_company("Staff DevOps Engineer");
+        assert_eq!(title, "Staff DevOps Engineer");
+        assert_eq!(company, None);
+    }
+
+    #[test]
+    fn test_parse_title_at_company_remote_comma() {
+        let (title, company) = parse_title_at_company("Senior Engineer, Remote");
+        assert_eq!(title, "Senior Engineer, Remote");
+        assert_eq!(company, None);
+    }
+
+    #[test]
+    fn test_parse_linkedin_email_with_job_links() {
+        let html = r#"<html><body>
+            <a href="https://www.linkedin.com/comm/jobs/view/12345?tracking=xyz">
+                Staff DevOps Engineer, DevInfra             SandboxAQ · United States (Remote)
+            </a>
+            <a href="https://www.linkedin.com/comm/jobs/view/67890?tracking=abc">
+                Senior Platform Engineer             Sully.ai · Mountain View, CA
+            </a>
+        </body></html>"#;
+        let result = parse_linkedin_email("Job alerts", html).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].title, "Staff DevOps Engineer, DevInfra");
+        assert_eq!(result[0].employer, Some("SandboxAQ".to_string()));
+        assert_eq!(result[0].url, Some("https://www.linkedin.com/comm/jobs/view/12345".to_string()));
+        assert_eq!(result[0].source, "linkedin");
+        assert_eq!(result[1].title, "Senior Platform Engineer");
+        assert_eq!(result[1].employer, Some("Sully.ai".to_string()));
+    }
+
+    #[test]
+    fn test_parse_linkedin_email_filters_search_links() {
+        let html = r#"<html><body>
+            <a href="https://www.linkedin.com/comm/jobs/search?keywords=DevOps">Search DevOps</a>
+            <a href="https://www.linkedin.com/comm/jobs/view/11111">
+                Senior SRE             Google · New York, NY
+            </a>
+            <a href="https://www.linkedin.com/comm/jobs/alerts">View all alerts</a>
+        </body></html>"#;
+        let result = parse_linkedin_email("alerts", html).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].title, "Senior SRE");
+    }
+
+    #[test]
+    fn test_parse_linkedin_email_filters_artifacts() {
+        let html = r#"<html><body>
+            <a href="https://www.linkedin.com/comm/jobs/view/111">Jobs</a>
+            <a href="https://www.linkedin.com/comm/jobs/view/222">View all</a>
+            <a href="https://www.linkedin.com/comm/jobs/view/333">
+                Cloud Infrastructure Engineer             Netflix · Los Gatos, CA
+            </a>
+        </body></html>"#;
+        let result = parse_linkedin_email("alerts", html).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].title, "Cloud Infrastructure Engineer");
+    }
+
+    #[test]
+    fn test_parse_linkedin_email_deduplicates() {
+        let html = r#"<html><body>
+            <a href="https://www.linkedin.com/comm/jobs/view/111">
+                DevOps Engineer             Acme · Remote
+            </a>
+            <a href="https://www.linkedin.com/comm/jobs/view/222">
+                DevOps Engineer             Acme · Remote
+            </a>
+        </body></html>"#;
+        let result = parse_linkedin_email("alerts", html).unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_linkedin_email_fallback_to_text() {
+        // No linkedin job links, should fall back to extract_jobs_from_text
+        let html = r#"<html><body>
+            <p>New job: Senior Software Engineer at Google</p>
+        </body></html>"#;
+        let result = parse_linkedin_email("alerts", html).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result[0].title.contains("Software Engineer"));
+    }
+
+    #[test]
+    fn test_parse_indeed_email_with_viewjob() {
+        let html = r#"<html><body>
+            <a href="https://www.indeed.com/viewjob?jk=abc123&tk=456">
+                Senior DevOps Engineer at Amazon
+            </a>
+            <a href="https://www.indeed.com/rc/clk?jk=def456">
+                Platform Engineer - Netflix
+            </a>
+        </body></html>"#;
+        let result = parse_indeed_email("Indeed alerts", html).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].title, "Senior DevOps Engineer");
+        assert_eq!(result[0].employer, Some("Amazon".to_string()));
+        assert_eq!(result[0].url, Some("https://www.indeed.com/viewjob".to_string()));
+        assert_eq!(result[0].source, "indeed");
+        assert_eq!(result[1].title, "Platform Engineer");
+        assert_eq!(result[1].employer, Some("Netflix".to_string()));
+    }
+
+    #[test]
+    fn test_parse_indeed_email_filters_search() {
+        let html = r#"<html><body>
+            <a href="https://www.indeed.com/jobs/search?q=engineer">Search engineers</a>
+            <a href="https://www.indeed.com/viewjob?jk=real123">
+                Cloud Engineer at AWS
+            </a>
+        </body></html>"#;
+        let result = parse_indeed_email("alerts", html).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].title, "Cloud Engineer");
+    }
+
+    #[test]
+    fn test_parse_indeed_email_no_job_links() {
+        let html = r#"<html><body>
+            <a href="https://www.indeed.com/account/settings">Settings</a>
+        </body></html>"#;
+        let result = parse_indeed_email("alerts", html).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_indeed_email_deduplicates() {
+        let html = r#"<html><body>
+            <a href="https://www.indeed.com/viewjob?jk=111">DevOps Engineer at Acme</a>
+            <a href="https://www.indeed.com/viewjob?jk=222">DevOps Engineer at Acme</a>
+        </body></html>"#;
+        let result = parse_indeed_email("alerts", html).unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_get_email_body_single_part() {
+        let raw = b"From: test@example.com\r\nSubject: Test\r\nContent-Type: text/plain\r\n\r\nHello World";
+        let parsed = mailparse::parse_mail(raw).unwrap();
+        let body = get_email_body(&parsed).unwrap();
+        assert!(body.contains("Hello World"));
+    }
+
+    #[test]
+    fn test_get_email_body_multipart_prefers_html() {
+        let raw = b"From: test@example.com\r\n\
+Subject: Test\r\n\
+Content-Type: multipart/alternative; boundary=\"boundary\"\r\n\
+\r\n\
+--boundary\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+Plain text\r\n\
+--boundary\r\n\
+Content-Type: text/html\r\n\
+\r\n\
+<html>HTML content</html>\r\n\
+--boundary--";
+        let parsed = mailparse::parse_mail(raw).unwrap();
+        let body = get_email_body(&parsed).unwrap();
+        assert!(body.contains("HTML content"));
+    }
+
+    #[test]
+    fn test_get_email_body_multipart_falls_back_to_plain() {
+        let raw = b"From: test@example.com\r\n\
+Subject: Test\r\n\
+Content-Type: multipart/mixed; boundary=\"boundary\"\r\n\
+\r\n\
+--boundary\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+Plain text body\r\n\
+--boundary\r\n\
+Content-Type: application/pdf\r\n\
+\r\n\
+PDF bytes\r\n\
+--boundary--";
+        let parsed = mailparse::parse_mail(raw).unwrap();
+        let body = get_email_body(&parsed).unwrap();
+        assert!(body.contains("Plain text body"));
+    }
+
+    #[test]
+    fn test_clean_tracking_url_preserves_path() {
+        assert_eq!(
+            clean_tracking_url("https://www.linkedin.com/comm/jobs/view/4210614397"),
+            Some("https://www.linkedin.com/comm/jobs/view/4210614397".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_title_at_company_dash_pattern() {
+        let (title, company) = parse_title_at_company("DevOps Lead - Amazon");
+        assert_eq!(title, "DevOps Lead");
+        assert_eq!(company, Some("Amazon".to_string()));
+    }
+
+    #[test]
+    fn test_parse_title_at_company_dash_skips_engineer_suffix() {
+        // "- Engineer" looks like part of a title, not a company
+        let (title, company) = parse_title_at_company("Senior Platform - Engineer");
+        assert_eq!(title, "Senior Platform - Engineer");
+        assert_eq!(company, None);
+    }
+
+    #[test]
+    fn test_parse_title_at_company_hybrid_comma() {
+        let (title, company) = parse_title_at_company("Senior Engineer, Hybrid");
+        assert_eq!(title, "Senior Engineer, Hybrid");
+        assert_eq!(company, None);
+    }
+
+    // --- process_email with in-memory DB ---
+
+    use crate::db::Database;
+
+    fn test_db() -> Database {
+        let db = Database::open_in_memory().unwrap();
+        db.init().unwrap();
+        db
+    }
+
+    #[test]
+    fn test_process_email_linkedin() {
+        let db = test_db();
+        let config = EmailConfig::gmail("test@gmail.com", "pass");
+        let ingester = EmailIngester::new(config);
+
+        let raw = format!(
+            "From: jobs-noreply@linkedin.com\r\n\
+             Subject: 2 new jobs\r\n\
+             Date: Mon, 10 Feb 2026 12:00:00 +0000\r\n\
+             Content-Type: text/html\r\n\
+             \r\n\
+             <html><body>\
+             <a href=\"https://www.linkedin.com/comm/jobs/view/111\">Senior DevOps Engineer             Acme · Remote</a>\
+             </body></html>"
+        );
+
+        let result = ingester.process_email(raw.as_bytes(), &db, false).unwrap();
+        assert_eq!(result.from, "jobs-noreply@linkedin.com");
+        assert_eq!(result.subject, "2 new jobs");
+        assert_eq!(result.jobs_found.len(), 1);
+        assert_eq!(result.jobs_found[0].title, "Senior DevOps Engineer");
+        assert!(matches!(result.jobs_found[0].status, JobResultStatus::Added));
+    }
+
+    #[test]
+    fn test_process_email_indeed() {
+        let db = test_db();
+        let config = EmailConfig::gmail("test@gmail.com", "pass");
+        let ingester = EmailIngester::new(config);
+
+        let raw = "From: noreply@indeed.com\r\n\
+             Subject: New jobs for you\r\n\
+             Date: Mon, 10 Feb 2026 12:00:00 +0000\r\n\
+             Content-Type: text/html\r\n\
+             \r\n\
+             <html><body>\
+             <a href=\"https://www.indeed.com/viewjob?jk=abc123\">Platform Engineer at Netflix</a>\
+             </body></html>";
+
+        let result = ingester.process_email(raw.as_bytes(), &db, false).unwrap();
+        assert_eq!(result.jobs_found.len(), 1);
+        assert_eq!(result.jobs_found[0].title, "Platform Engineer");
+        assert_eq!(result.jobs_found[0].employer, "Netflix");
+    }
+
+    #[test]
+    fn test_process_email_dry_run() {
+        let db = test_db();
+        let config = EmailConfig::gmail("test@gmail.com", "pass");
+        let ingester = EmailIngester::new(config);
+
+        let raw = "From: jobs-noreply@linkedin.com\r\n\
+             Subject: Jobs\r\n\
+             Date: Mon, 10 Feb 2026 12:00:00 +0000\r\n\
+             Content-Type: text/html\r\n\
+             \r\n\
+             <html><body>\
+             <a href=\"https://www.linkedin.com/comm/jobs/view/222\">Cloud Engineer             AWS · Seattle</a>\
+             </body></html>";
+
+        let result = ingester.process_email(raw.as_bytes(), &db, true).unwrap();
+        assert_eq!(result.jobs_found.len(), 1);
+        assert!(matches!(result.jobs_found[0].status, JobResultStatus::DryRun));
+
+        // Verify nothing was added to DB
+        let jobs = db.list_jobs(None, None).unwrap();
+        assert!(jobs.is_empty());
+    }
+
+    #[test]
+    fn test_process_email_duplicate_detection() {
+        let db = test_db();
+        let config = EmailConfig::gmail("test@gmail.com", "pass");
+        let ingester = EmailIngester::new(config);
+
+        // Add a job with a specific URL first
+        db.add_job_full("Platform Engineer", Some("Acme"), Some("https://www.linkedin.com/comm/jobs/view/333"), None, None, None, None).unwrap();
+
+        // Email with the same URL should detect duplicate
+        let raw = "From: jobs-noreply@linkedin.com\r\n\
+             Subject: Jobs\r\n\
+             Date: Mon, 10 Feb 2026 12:00:00 +0000\r\n\
+             Content-Type: text/html\r\n\
+             \r\n\
+             <html><body>\
+             <a href=\"https://www.linkedin.com/comm/jobs/view/333\">Platform Engineer at Acme</a>\
+             </body></html>";
+
+        let result = ingester.process_email(raw.as_bytes(), &db, false).unwrap();
+        assert_eq!(result.jobs_found.len(), 1);
+        assert!(matches!(result.jobs_found[0].status, JobResultStatus::Duplicate));
+    }
+
+    #[test]
+    fn test_process_email_generic() {
+        let db = test_db();
+        let config = EmailConfig::gmail("test@gmail.com", "pass");
+        let ingester = EmailIngester::new(config);
+
+        let raw = "From: recruiter@company.com\r\n\
+             Subject: Job opportunity\r\n\
+             Date: Mon, 10 Feb 2026 12:00:00 +0000\r\n\
+             Content-Type: text/html\r\n\
+             \r\n\
+             <html><body><p>We have a Senior Software Engineer opening</p></body></html>";
+
+        let result = ingester.process_email(raw.as_bytes(), &db, false).unwrap();
+        // Generic parser uses regex, should find "Senior Software Engineer"
+        assert!(!result.jobs_found.is_empty());
+    }
+
+    #[test]
+    fn test_job_exists_returns_false_for_new() {
+        let db = test_db();
+        let job = ParsedJob {
+            title: "New Unique Job".to_string(),
+            employer: Some("NewCorp".to_string()),
+            url: None, location: None,
+            pay_min: None, pay_max: None,
+            source: "test".to_string(),
+            raw_text: "test".to_string(),
+        };
+        assert!(!job_exists(&db, &job).unwrap());
+    }
+
+    #[test]
+    fn test_job_exists_returns_true_for_duplicate() {
+        let db = test_db();
+        db.add_job_full("DevOps Engineer", Some("Acme"), None, None, None, None, None).unwrap();
+
+        let job = ParsedJob {
+            title: "DevOps Engineer".to_string(),
+            employer: Some("Acme".to_string()),
+            url: None, location: None,
+            pay_min: None, pay_max: None,
+            source: "test".to_string(),
+            raw_text: "test".to_string(),
+        };
+        assert!(job_exists(&db, &job).unwrap());
+    }
+
+    #[test]
+    fn test_add_job_from_email_stores_job() {
+        let db = test_db();
+        let job = ParsedJob {
+            title: "Platform Engineer".to_string(),
+            employer: Some("Netflix".to_string()),
+            url: Some("https://example.com/job/1".to_string()),
+            location: None,
+            pay_min: Some(150000),
+            pay_max: Some(250000),
+            source: "linkedin".to_string(),
+            raw_text: "Full job description".to_string(),
+        };
+
+        let id = add_job_from_email(&db, &job).unwrap();
+        assert!(id > 0);
+
+        let stored = db.get_job(id).unwrap().unwrap();
+        assert_eq!(stored.title, "Platform Engineer");
+        assert_eq!(stored.pay_min, Some(150000));
+        assert_eq!(stored.pay_max, Some(250000));
+    }
+
+    #[test]
+    fn test_spin_function() {
+        // Test that spin() runs the closure and returns the result
+        let result = spin("testing", || 42);
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_ingest_stats_default() {
+        let stats = IngestStats::default();
+        assert_eq!(stats.emails_found, 0);
+        assert_eq!(stats.jobs_added, 0);
+        assert_eq!(stats.duplicates, 0);
+        assert_eq!(stats.errors, 0);
+    }
+
+    #[test]
+    fn test_from_gmail_password_file() {
+        // Create a temp file with a password
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_gmail_pass.txt");
+        std::fs::write(&path, "my-app-password\n").unwrap();
+
+        let config = EmailConfig::from_gmail_password_file("user@gmail.com", &path).unwrap();
+        assert_eq!(config.username, "user@gmail.com");
+        assert_eq!(config.password, "my-app-password");
+        assert_eq!(config.server, "imap.gmail.com");
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_from_gmail_password_file_missing() {
+        let path = std::path::Path::new("/tmp/nonexistent_password_file_xyz.txt");
+        let result = EmailConfig::from_gmail_password_file("user@gmail.com", path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_process_email_no_jobs() {
+        let db = test_db();
+        let config = EmailConfig::gmail("test@gmail.com", "pass");
+        let ingester = EmailIngester::new(config);
+
+        let raw = "From: jobs-noreply@linkedin.com\r\n\
+             Subject: Updates\r\n\
+             Date: Mon, 10 Feb 2026 12:00:00 +0000\r\n\
+             Content-Type: text/html\r\n\
+             \r\n\
+             <html><body><p>No job links here</p></body></html>";
+
+        let result = ingester.process_email(raw.as_bytes(), &db, false).unwrap();
+        assert!(result.jobs_found.is_empty());
+    }
+
+    #[test]
+    fn test_process_email_multiple_linkedin_jobs() {
+        let db = test_db();
+        let config = EmailConfig::gmail("test@gmail.com", "pass");
+        let ingester = EmailIngester::new(config);
+
+        let raw = "From: jobs-noreply@linkedin.com\r\n\
+             Subject: 3 new jobs\r\n\
+             Date: Mon, 10 Feb 2026 12:00:00 +0000\r\n\
+             Content-Type: text/html\r\n\
+             \r\n\
+             <html><body>\
+             <a href=\"https://www.linkedin.com/comm/jobs/view/100\">DevOps Engineer at Google</a>\
+             <a href=\"https://www.linkedin.com/comm/jobs/view/200\">Platform Engineer at Meta</a>\
+             <a href=\"https://www.linkedin.com/comm/jobs/view/300\">SRE at Amazon</a>\
+             </body></html>";
+
+        let result = ingester.process_email(raw.as_bytes(), &db, false).unwrap();
+        assert_eq!(result.jobs_found.len(), 3);
+
+        // All should be Added
+        for jr in &result.jobs_found {
+            assert!(matches!(jr.status, JobResultStatus::Added));
+        }
+
+        // Verify they were stored
+        let jobs = db.list_jobs(None, None).unwrap();
+        assert_eq!(jobs.len(), 3);
+    }
 }

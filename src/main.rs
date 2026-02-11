@@ -2413,3 +2413,275 @@ fn countdown(seconds: u64) {
     }
     println!();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- truncate / add_jitter ---
+
+    #[test]
+    fn test_truncate_short() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_exact() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_long() {
+        assert_eq!(truncate("hello world", 8), "hello...");
+    }
+
+    #[test]
+    fn test_add_jitter_range() {
+        for _ in 0..20 {
+            let result = add_jitter(100);
+            assert!(result >= 80 && result <= 120, "jitter {} out of range", result);
+        }
+    }
+
+    #[test]
+    fn test_add_jitter_zero() {
+        let result = add_jitter(0);
+        assert_eq!(result, 0);
+    }
+
+    // --- Research stubs ---
+
+    #[test]
+    fn test_search_yc_company_returns_none() {
+        let info = search_yc_company("Test Corp").unwrap();
+        assert!(info.batch.is_none());
+        assert!(info.url.is_none());
+    }
+
+    #[test]
+    fn test_search_hn_mentions_returns_zero() {
+        assert_eq!(search_hn_mentions("Test Corp").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_research_startup_returns_default() {
+        let data = research_startup("Test Corp").unwrap();
+        assert!(data.yc_batch.is_none());
+        assert!(data.yc_url.is_none());
+        assert_eq!(data.hn_mentions_count, Some(0));
+        assert!(data.crunchbase_url.is_none());
+    }
+
+    #[test]
+    fn test_research_public_company_returns_summary() {
+        let data = research_public_company("Acme Corp").unwrap();
+        assert!(data.evil_summary.is_some());
+        assert!(data.evil_summary.unwrap().contains("Acme Corp"));
+        assert!(data.controversies.is_none());
+        assert!(data.labor_practices.is_none());
+    }
+
+    #[test]
+    fn test_search_parent_company_returns_independent() {
+        let info = search_parent_company("Test Corp").unwrap();
+        assert!(info.parent_name.is_none());
+        assert_eq!(info.relationship_type, "independent");
+    }
+
+    #[test]
+    fn test_search_pe_ownership_returns_none() {
+        let info = search_pe_ownership("Test Corp").unwrap();
+        assert!(info.firm_name.is_none());
+        assert!(info.firm_url.is_none());
+    }
+
+    #[test]
+    fn test_search_investor_info_returns_empty() {
+        let investors = search_investor_info("Test Corp").unwrap();
+        assert!(investors.is_empty());
+    }
+
+    #[test]
+    fn test_search_ownership_concerns_returns_empty() {
+        let concerns = search_ownership_concerns("Test Corp").unwrap();
+        assert!(concerns.is_empty());
+    }
+
+    #[test]
+    fn test_research_private_ownership_returns_default() {
+        let data = research_private_ownership("Test Corp").unwrap();
+        assert!(data.parent_company.is_none());
+        assert!(data.pe_owner.is_none());
+        assert_eq!(data.ownership_type, Some("independent".to_string()));
+        assert!(data.vc_investors.is_none());
+        assert!(data.ownership_concerns.is_none());
+    }
+
+    // --- Cleanup functions (with in-memory DB) ---
+
+    fn create_test_db() -> Result<Database> {
+        let db = Database::open_in_memory()?;
+        db.init()?;
+        Ok(db)
+    }
+
+    #[test]
+    fn test_cleanup_artifacts_short_title() -> Result<()> {
+        let db = create_test_db()?;
+        db.add_job_full("Hi", None, None, None, None, None, None)?;
+        db.add_job_full("Real DevOps Engineer Job", Some("Acme"), None, None, None, None, None)?;
+        let removed = cleanup_artifacts(&db, false)?;
+        assert_eq!(removed, 1);
+        let remaining = db.list_jobs(None, None)?;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].title, "Real DevOps Engineer Job");
+        Ok(())
+    }
+
+    #[test]
+    fn test_cleanup_artifacts_patterns() -> Result<()> {
+        let db = create_test_db()?;
+        db.add_job_full("Apply now for this role", None, None, None, None, None, None)?;
+        db.add_job_full("Click here to apply", None, None, None, None, None, None)?;
+        db.add_job_full("View all positions", None, None, None, None, None, None)?;
+        db.add_job_full("Senior DevOps Engineer", Some("Co"), None, None, None, None, None)?;
+        let removed = cleanup_artifacts(&db, false)?;
+        assert_eq!(removed, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_cleanup_artifacts_search_url() -> Result<()> {
+        let db = create_test_db()?;
+        db.add_job_full("Some title that is long enough", None, Some("https://www.linkedin.com/comm/jobs/search?keywords=test"), None, None, None, None)?;
+        db.add_job_full("Real Job Title Here", Some("Co"), Some("https://www.linkedin.com/comm/jobs/view/12345"), None, None, None, None)?;
+        let removed = cleanup_artifacts(&db, false)?;
+        assert_eq!(removed, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_cleanup_artifacts_dry_run() -> Result<()> {
+        let db = create_test_db()?;
+        db.add_job_full("Hi", None, None, None, None, None, None)?;
+        let removed = cleanup_artifacts(&db, true)?;
+        assert_eq!(removed, 1);
+        // Dry run should NOT delete
+        let remaining = db.list_jobs(None, None)?;
+        assert_eq!(remaining.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_cleanup_duplicates_removes_dupes() -> Result<()> {
+        let db = create_test_db()?;
+        db.add_job_full("DevOps Engineer", Some("Acme"), None, None, None, None, None)?;
+        db.add_job_full("DevOps Engineer", Some("Acme"), None, None, None, None, None)?;
+        let removed = cleanup_duplicates(&db, false)?;
+        assert_eq!(removed, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_cleanup_duplicates_dry_run() -> Result<()> {
+        let db = create_test_db()?;
+        db.add_job_full("DevOps Engineer", Some("Acme"), None, None, None, None, None)?;
+        db.add_job_full("DevOps Engineer", Some("Acme"), None, None, None, None, None)?;
+        let removed = cleanup_duplicates(&db, true)?;
+        assert_eq!(removed, 1);
+        // Dry run should NOT delete
+        let remaining = db.list_jobs(None, None)?;
+        assert_eq!(remaining.len(), 2);
+        Ok(())
+    }
+
+    // --- check_binary ---
+
+    #[test]
+    fn test_check_binary_exists() {
+        // `ls` should always exist on Linux
+        let result = check_binary("ls");
+        assert!(result.is_some());
+        assert!(!result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_check_binary_not_found() {
+        let result = check_binary("nonexistent_binary_xyz_12345");
+        assert!(result.is_none());
+    }
+
+    // --- check_gmail_password_file ---
+
+    #[test]
+    fn test_check_gmail_password_file_missing() {
+        // In a clean test environment, this file shouldn't exist at a random path
+        // The function checks ~/.gmail.app_password.txt — we just verify it returns Some or None
+        let result = check_gmail_password_file();
+        // Either it exists or it doesn't, both are valid — just exercise the code
+        let _ = result;
+    }
+
+    // --- require_browser_deps ---
+
+    #[test]
+    fn test_require_browser_deps() {
+        // Just exercise the code path. If geckodriver/firefox are missing, it returns Err.
+        let result = require_browser_deps();
+        // Don't assert on the result since deps may or may not be installed
+        let _ = result;
+    }
+
+    // --- display_domain_keywords ---
+
+    #[test]
+    fn test_display_domain_keywords_empty() {
+        display_domain_keywords(&[]);
+    }
+
+    #[test]
+    fn test_display_domain_keywords_all_domains() {
+        let keywords = vec![
+            models::JobKeyword {
+                id: 1, job_id: 1, keyword: "Kubernetes".to_string(),
+                domain: "tech".to_string(), weight: 3,
+                source_model: "mock".to_string(), created_at: String::new(),
+            },
+            models::JobKeyword {
+                id: 2, job_id: 1, keyword: "Docker".to_string(),
+                domain: "tech".to_string(), weight: 2,
+                source_model: "mock".to_string(), created_at: String::new(),
+            },
+            models::JobKeyword {
+                id: 3, job_id: 1, keyword: "Terraform".to_string(),
+                domain: "tech".to_string(), weight: 1,
+                source_model: "mock".to_string(), created_at: String::new(),
+            },
+            models::JobKeyword {
+                id: 4, job_id: 1, keyword: "SRE".to_string(),
+                domain: "discipline".to_string(), weight: 3,
+                source_model: "mock".to_string(), created_at: String::new(),
+            },
+            models::JobKeyword {
+                id: 5, job_id: 1, keyword: "AWS".to_string(),
+                domain: "cloud".to_string(), weight: 2,
+                source_model: "mock".to_string(), created_at: String::new(),
+            },
+            models::JobKeyword {
+                id: 6, job_id: 1, keyword: "Leadership".to_string(),
+                domain: "soft_skill".to_string(), weight: 1,
+                source_model: "mock".to_string(), created_at: String::new(),
+            },
+        ];
+        // Just exercise all branches — no panics
+        display_domain_keywords(&keywords);
+    }
+
+    // --- run_dependency_check ---
+
+    #[test]
+    fn test_run_dependency_check() {
+        // Exercise the full dependency check — all branches are hit
+        run_dependency_check();
+    }
+}
