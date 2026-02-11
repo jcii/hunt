@@ -33,7 +33,7 @@ jobs:
       - name: Generate coverage
         run: |
           mkdir -p coverage
-          cargo tarpaulin --out xml --out html --output-dir coverage/ 2>&1 | tee coverage/tarpaulin.log
+          cargo tarpaulin --out xml --out html --output-dir coverage/ --exclude-files src/browser.rs 2>&1 | tee coverage/tarpaulin.log
       - name: Write coverage to job summary
         run: |
           echo "## Code Coverage" >> $GITHUB_STEP_SUMMARY

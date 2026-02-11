@@ -13,7 +13,7 @@ use std::io::stdout;
 use crate::db::{self, Database};
 use crate::models::{FitAnalysis, Job, JobKeyword, JobKeywordProfile};
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum SortField {
     Score,
     Salary,
@@ -754,5 +754,495 @@ mod tests {
         assert_eq!(SortField::Salary.label(), "Salary");
         assert_eq!(SortField::Fit.label(), "Fit");
         assert_eq!(SortField::Company.label(), "Company");
+    }
+
+    fn make_job(id: i64, title: &str, employer: Option<&str>, status: &str, pay_max: Option<i64>) -> Job {
+        Job {
+            id, employer_id: None, employer_name: employer.map(|s| s.to_string()),
+            title: title.to_string(), url: None, source: None,
+            status: status.to_string(), raw_text: None,
+            pay_min: None, pay_max,
+            job_code: None, fetched_at: None, created_at: String::new(), updated_at: String::new(),
+        }
+    }
+
+    fn make_state(jobs: Vec<Job>, scores: Vec<f64>, fit_scores: Vec<Option<f64>>) -> AppState {
+        let mut s = AppState {
+            visible: Vec::new(),
+            jobs,
+            scores,
+            fit_scores,
+            selected: 0,
+            scroll_offset: 0,
+            keywords: Vec::new(),
+            profile: None,
+            keyword_model: None,
+            fit_analysis: None,
+            search_active: false,
+            search_query: String::new(),
+            hide_closed: true,
+            sort_field: SortField::Score,
+            sort_ascending: false,
+        };
+        s.update_filter();
+        s
+    }
+
+    #[test]
+    fn test_update_filter_hides_closed() {
+        let jobs = vec![
+            make_job(1, "Open Job", Some("Co"), "new", None),
+            make_job(2, "Closed Job", Some("Co"), "closed", None),
+        ];
+        let state = make_state(jobs, vec![50.0, 60.0], vec![None, None]);
+        assert_eq!(state.visible.len(), 1);
+        assert_eq!(state.visible[0], 0); // only the open job
+    }
+
+    #[test]
+    fn test_update_filter_shows_closed_when_disabled() {
+        let jobs = vec![
+            make_job(1, "Open Job", Some("Co"), "new", None),
+            make_job(2, "Closed Job", Some("Co"), "closed", None),
+        ];
+        let mut state = make_state(jobs, vec![50.0, 60.0], vec![None, None]);
+        state.hide_closed = false;
+        state.update_filter();
+        assert_eq!(state.visible.len(), 2);
+    }
+
+    #[test]
+    fn test_update_filter_search() {
+        let jobs = vec![
+            make_job(1, "DevOps Engineer", Some("Google"), "new", None),
+            make_job(2, "Frontend Developer", Some("Meta"), "new", None),
+            make_job(3, "DevOps Lead", Some("Amazon"), "new", None),
+        ];
+        let mut state = make_state(jobs, vec![50.0, 50.0, 50.0], vec![None, None, None]);
+        state.search_query = "devops".to_string();
+        state.update_filter();
+        assert_eq!(state.visible.len(), 2);
+    }
+
+    #[test]
+    fn test_update_filter_search_by_employer() {
+        let jobs = vec![
+            make_job(1, "Engineer", Some("Google"), "new", None),
+            make_job(2, "Engineer", Some("Meta"), "new", None),
+        ];
+        let mut state = make_state(jobs, vec![50.0, 50.0], vec![None, None]);
+        state.search_query = "google".to_string();
+        state.update_filter();
+        assert_eq!(state.visible.len(), 1);
+    }
+
+    #[test]
+    fn test_sort_by_score_descending() {
+        let jobs = vec![
+            make_job(1, "Low", Some("Co"), "new", None),
+            make_job(2, "High", Some("Co"), "new", None),
+        ];
+        let state = make_state(jobs, vec![30.0, 80.0], vec![None, None]);
+        // Default: Score descending, so higher score first
+        assert_eq!(state.visible[0], 1); // High score job
+        assert_eq!(state.visible[1], 0); // Low score job
+    }
+
+    #[test]
+    fn test_sort_by_salary() {
+        let jobs = vec![
+            make_job(1, "Low pay", Some("Co"), "new", Some(100000)),
+            make_job(2, "High pay", Some("Co"), "new", Some(200000)),
+            make_job(3, "No pay", Some("Co"), "new", None),
+        ];
+        let mut state = make_state(jobs, vec![50.0, 50.0, 50.0], vec![None, None, None]);
+        state.sort_field = SortField::Salary;
+        state.sort_ascending = false;
+        state.update_filter();
+        assert_eq!(state.visible[0], 1); // $200k first
+        assert_eq!(state.visible[1], 0); // $100k
+        assert_eq!(state.visible[2], 2); // $0 last
+    }
+
+    #[test]
+    fn test_sort_by_fit() {
+        let jobs = vec![
+            make_job(1, "A", Some("Co"), "new", None),
+            make_job(2, "B", Some("Co"), "new", None),
+            make_job(3, "C", Some("Co"), "new", None),
+        ];
+        let mut state = make_state(jobs, vec![50.0, 50.0, 50.0], vec![Some(90.0), Some(60.0), None]);
+        state.sort_field = SortField::Fit;
+        state.sort_ascending = false;
+        state.update_filter();
+        assert_eq!(state.visible[0], 0); // 90.0 first
+        assert_eq!(state.visible[1], 1); // 60.0
+        assert_eq!(state.visible[2], 2); // None last
+    }
+
+    #[test]
+    fn test_sort_by_company() {
+        let jobs = vec![
+            make_job(1, "J1", Some("Zeta"), "new", None),
+            make_job(2, "J2", Some("Alpha"), "new", None),
+            make_job(3, "J3", Some("Mid"), "new", None),
+        ];
+        let mut state = make_state(jobs, vec![50.0, 50.0, 50.0], vec![None, None, None]);
+        state.sort_field = SortField::Company;
+        state.sort_ascending = true; // A-Z
+        state.update_filter();
+        assert_eq!(state.visible[0], 1); // Alpha
+        assert_eq!(state.visible[1], 2); // Mid
+        assert_eq!(state.visible[2], 0); // Zeta
+    }
+
+    #[test]
+    fn test_next_and_prev() {
+        let jobs = vec![
+            make_job(1, "A", Some("Co"), "new", None),
+            make_job(2, "B", Some("Co"), "new", None),
+            make_job(3, "C", Some("Co"), "new", None),
+        ];
+        let mut state = make_state(jobs, vec![50.0, 50.0, 50.0], vec![None, None, None]);
+        assert_eq!(state.selected, 0);
+        state.next();
+        assert_eq!(state.selected, 1);
+        state.next();
+        assert_eq!(state.selected, 2);
+        state.next(); // should stay at 2 (boundary)
+        assert_eq!(state.selected, 2);
+        state.prev();
+        assert_eq!(state.selected, 1);
+        state.prev();
+        assert_eq!(state.selected, 0);
+        state.prev(); // should stay at 0 (boundary)
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn test_page_down_and_up() {
+        let jobs: Vec<Job> = (0..20).map(|i| make_job(i, &format!("Job {i}"), Some("Co"), "new", None)).collect();
+        let scores = vec![50.0; 20];
+        let fits = vec![None; 20];
+        let mut state = make_state(jobs, scores, fits);
+        assert_eq!(state.selected, 0);
+        state.page_down(10);
+        assert_eq!(state.selected, 10);
+        state.page_down(10);
+        assert_eq!(state.selected, 19); // clamped to last
+        state.page_up(10);
+        assert_eq!(state.selected, 9);
+        state.page_up(10);
+        assert_eq!(state.selected, 0); // clamped to 0
+    }
+
+    #[test]
+    fn test_scroll_up_down() {
+        let jobs = vec![make_job(1, "A", Some("Co"), "new", None)];
+        let mut state = make_state(jobs, vec![50.0], vec![None]);
+        assert_eq!(state.scroll_offset, 0);
+        state.scroll_down();
+        assert_eq!(state.scroll_offset, 3);
+        state.scroll_down();
+        assert_eq!(state.scroll_offset, 6);
+        state.scroll_up();
+        assert_eq!(state.scroll_offset, 3);
+        state.scroll_up();
+        assert_eq!(state.scroll_offset, 0);
+        state.scroll_up(); // saturating
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_set_sort_toggle() {
+        let jobs = vec![make_job(1, "A", Some("Co"), "new", None)];
+        let mut state = make_state(jobs, vec![50.0], vec![None]);
+        assert_eq!(state.sort_field, SortField::Score);
+        assert!(!state.sort_ascending);
+
+        // Same field toggles direction
+        state.set_sort(SortField::Score);
+        assert!(state.sort_ascending);
+
+        // Different field sets new field with default direction
+        state.set_sort(SortField::Company);
+        assert_eq!(state.sort_field, SortField::Company);
+        assert!(state.sort_ascending); // Company defaults ascending
+
+        state.set_sort(SortField::Salary);
+        assert_eq!(state.sort_field, SortField::Salary);
+        assert!(!state.sort_ascending); // Salary defaults descending
+    }
+
+    #[test]
+    fn test_current_job() {
+        let jobs = vec![
+            make_job(1, "First", Some("Co"), "new", None),
+            make_job(2, "Second", Some("Co"), "new", None),
+        ];
+        let mut state = make_state(jobs, vec![50.0, 60.0], vec![None, None]);
+        let job = state.current_job().unwrap();
+        assert!(job.title == "First" || job.title == "Second"); // depends on sort
+        state.selected = 1;
+        assert!(state.current_job().is_some());
+    }
+
+    #[test]
+    fn test_empty_state() {
+        let state = make_state(vec![], vec![], vec![]);
+        assert!(state.visible.is_empty());
+        assert_eq!(state.selected, 0);
+        assert!(state.current_job().is_none());
+    }
+
+    #[test]
+    fn test_update_filter_clamps_selected() {
+        let jobs = vec![
+            make_job(1, "A", Some("Co"), "new", None),
+            make_job(2, "B", Some("Co"), "new", None),
+            make_job(3, "C", Some("Co"), "new", None),
+        ];
+        let mut state = make_state(jobs, vec![50.0, 50.0, 50.0], vec![None, None, None]);
+        state.selected = 2;
+        state.search_query = "A".to_string();
+        state.update_filter();
+        // Only 1 visible, selected should be clamped to 0
+        assert_eq!(state.selected, 0);
+    }
+
+    // --- build_detail tests ---
+
+    #[test]
+    fn test_build_detail_no_job_selected() {
+        let state = make_state(vec![], vec![], vec![]);
+        let text = build_detail(&state);
+        let content: String = text.lines.iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(content.contains("No job selected"));
+    }
+
+    #[test]
+    fn test_build_detail_basic_job() {
+        let mut job = make_job(1, "DevOps Engineer", Some("Acme Corp"), "new", None);
+        job.url = Some("https://example.com/job/1".to_string());
+        let jobs = vec![job];
+        let state = make_state(jobs, vec![50.0], vec![None]);
+        let text = build_detail(&state);
+        let content: String = text.lines.iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(content.contains("DevOps Engineer"));
+        assert!(content.contains("Acme Corp"));
+        assert!(content.contains("Status: new"));
+        assert!(content.contains("https://example.com/job/1"));
+    }
+
+    #[test]
+    fn test_build_detail_with_pay_range() {
+        let job = make_job(1, "Engineer", Some("Co"), "reviewing", Some(200000));
+        let mut state = make_state(vec![job], vec![50.0], vec![None]);
+        // Set pay_min on the job
+        state.jobs[0].pay_min = Some(150000);
+        state.update_filter();
+        let text = build_detail(&state);
+        let content: String = text.lines.iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(content.contains("Pay: $150000 - $200000"));
+    }
+
+    #[test]
+    fn test_build_detail_pay_min_only() {
+        let mut job = make_job(1, "Eng", Some("Co"), "new", None);
+        job.pay_min = Some(100000);
+        let state = make_state(vec![job], vec![50.0], vec![None]);
+        let text = build_detail(&state);
+        let content: String = text.lines.iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(content.contains("Pay: $100000+"));
+    }
+
+    #[test]
+    fn test_build_detail_pay_max_only() {
+        let job = make_job(1, "Eng", Some("Co"), "new", Some(180000));
+        let state = make_state(vec![job], vec![50.0], vec![None]);
+        let text = build_detail(&state);
+        let content: String = text.lines.iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(content.contains("Pay: up to $180000"));
+    }
+
+    #[test]
+    fn test_build_detail_all_statuses() {
+        for status in &["new", "reviewing", "applied", "rejected", "closed"] {
+            let job = make_job(1, "Eng", Some("Co"), status, None);
+            let mut state = make_state(vec![job], vec![50.0], vec![None]);
+            state.hide_closed = false;
+            state.update_filter();
+            let text = build_detail(&state);
+            let content: String = text.lines.iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+                .collect();
+            assert!(content.contains(&format!("Status: {}", status)),
+                "Expected 'Status: {}' in detail output", status);
+        }
+    }
+
+    #[test]
+    fn test_build_detail_with_fit_analysis() {
+        let job = make_job(1, "Eng", Some("Co"), "new", None);
+        let mut state = make_state(vec![job], vec![50.0], vec![None]);
+        state.fit_analysis = Some(FitAnalysis {
+            id: 1,
+            job_id: 1,
+            base_resume_id: 1,
+            source_model: "gpt-5.2".to_string(),
+            fit_score: 85.0,
+            strong_matches: Some("Python, Docker".to_string()),
+            gaps: Some("Kubernetes".to_string()),
+            stretch_areas: None,
+            narrative: String::new(),
+            created_at: String::new(),
+        });
+        let text = build_detail(&state);
+        let content: String = text.lines.iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(content.contains("85/100"));
+        assert!(content.contains("gpt-5.2"));
+        assert!(content.contains("Python, Docker"));
+        assert!(content.contains("Kubernetes"));
+    }
+
+    #[test]
+    fn test_build_detail_fit_medium_score() {
+        let job = make_job(1, "Eng", Some("Co"), "new", None);
+        let mut state = make_state(vec![job], vec![50.0], vec![None]);
+        state.fit_analysis = Some(FitAnalysis {
+            id: 1, job_id: 1, base_resume_id: 1,
+            source_model: "mock".to_string(), fit_score: 60.0,
+            strong_matches: None, gaps: None, stretch_areas: None,
+            narrative: String::new(), created_at: String::new(),
+        });
+        let text = build_detail(&state);
+        let content: String = text.lines.iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(content.contains("60/100"));
+    }
+
+    #[test]
+    fn test_build_detail_fit_low_score() {
+        let job = make_job(1, "Eng", Some("Co"), "new", None);
+        let mut state = make_state(vec![job], vec![50.0], vec![None]);
+        state.fit_analysis = Some(FitAnalysis {
+            id: 1, job_id: 1, base_resume_id: 1,
+            source_model: "mock".to_string(), fit_score: 30.0,
+            strong_matches: None, gaps: None, stretch_areas: None,
+            narrative: String::new(), created_at: String::new(),
+        });
+        let text = build_detail(&state);
+        let content: String = text.lines.iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(content.contains("30/100"));
+    }
+
+    #[test]
+    fn test_build_detail_with_keywords() {
+        let job = make_job(1, "Eng", Some("Co"), "new", None);
+        let mut state = make_state(vec![job], vec![50.0], vec![None]);
+        state.keyword_model = Some("gpt-5.2".to_string());
+        state.keywords = vec![
+            JobKeyword {
+                id: 1, job_id: 1, keyword: "Kubernetes".to_string(),
+                domain: "tech".to_string(), weight: 3,
+                source_model: "gpt-5.2".to_string(), created_at: String::new(),
+            },
+            JobKeyword {
+                id: 2, job_id: 1, keyword: "Python".to_string(),
+                domain: "tech".to_string(), weight: 2,
+                source_model: "gpt-5.2".to_string(), created_at: String::new(),
+            },
+            JobKeyword {
+                id: 3, job_id: 1, keyword: "Leadership".to_string(),
+                domain: "soft_skill".to_string(), weight: 1,
+                source_model: "gpt-5.2".to_string(), created_at: String::new(),
+            },
+        ];
+        let text = build_detail(&state);
+        let content: String = text.lines.iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(content.contains("Keywords (gpt-5.2)"));
+        assert!(content.contains("TECH"));
+        assert!(content.contains("Kubernetes"));
+        assert!(content.contains("Python"));
+        assert!(content.contains("SOFT SKILLS"));
+        assert!(content.contains("Leadership"));
+    }
+
+    #[test]
+    fn test_build_detail_with_profile() {
+        let job = make_job(1, "Eng", Some("Co"), "new", None);
+        let mut state = make_state(vec![job], vec![50.0], vec![None]);
+        state.keyword_model = Some("mock".to_string());
+        state.keywords = vec![
+            JobKeyword {
+                id: 1, job_id: 1, keyword: "Go".to_string(),
+                domain: "tech".to_string(), weight: 3,
+                source_model: "mock".to_string(), created_at: String::new(),
+            },
+        ];
+        state.profile = Some(JobKeywordProfile {
+            id: 1, job_id: 1, source_model: "mock".to_string(),
+            profile: "Strong backend engineering role".to_string(),
+            created_at: String::new(),
+        });
+        let text = build_detail(&state);
+        let content: String = text.lines.iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(content.contains("PROFILE"));
+        assert!(content.contains("Strong backend engineering role"));
+    }
+
+    #[test]
+    fn test_build_detail_raw_text_fallback() {
+        let mut job = make_job(1, "Eng", Some("Co"), "new", None);
+        job.raw_text = Some("Full job description here".to_string());
+        let state = make_state(vec![job], vec![50.0], vec![None]);
+        let text = build_detail(&state);
+        let content: String = text.lines.iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(content.contains("No keywords"));
+        assert!(content.contains("Full job description here"));
+    }
+
+    #[test]
+    fn test_build_detail_no_description() {
+        let job = make_job(1, "Eng", Some("Co"), "new", None);
+        let state = make_state(vec![job], vec![50.0], vec![None]);
+        let text = build_detail(&state);
+        let content: String = text.lines.iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(content.contains("No description fetched"));
+    }
+
+    #[test]
+    fn test_build_detail_no_employer() {
+        let job = make_job(1, "Solo Job", None, "new", None);
+        let state = make_state(vec![job], vec![50.0], vec![None]);
+        let text = build_detail(&state);
+        let content: String = text.lines.iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(content.contains("Solo Job"));
+        assert!(!content.contains("at "));
     }
 }

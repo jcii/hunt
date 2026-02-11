@@ -41,6 +41,13 @@ impl Database {
         &self.path
     }
 
+    /// Create an in-memory database for testing
+    #[cfg(test)]
+    pub fn open_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        Ok(Self { conn, path: PathBuf::from(":memory:") })
+    }
+
     fn default_path() -> Result<PathBuf> {
         // Use XDG data directory or fallback
         if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "hunt") {
