@@ -168,7 +168,7 @@ enum Commands {
         job_id: i64,
 
         /// AI model to use (default: claude-sonnet)
-        #[arg(short, long, default_value = "claude-sonnet")]
+        #[arg(short, long, default_value = "gpt-5.2")]
         model: String,
     },
 
@@ -179,7 +179,7 @@ enum Commands {
         job_id: Option<i64>,
 
         /// AI model to use (default: claude-sonnet)
-        #[arg(short, long, default_value = "claude-sonnet")]
+        #[arg(short, long, default_value = "gpt-5.2")]
         model: String,
 
         /// Search for a keyword across all jobs
@@ -210,7 +210,7 @@ enum Commands {
         resume: String,
 
         /// AI model to use (default: claude-sonnet)
-        #[arg(short, long, default_value = "claude-sonnet")]
+        #[arg(short, long, default_value = "gpt-5.2")]
         model: String,
 
         /// Run fit analysis on all jobs with descriptions
@@ -248,7 +248,7 @@ enum Commands {
         days: u32,
 
         /// AI model for keyword extraction
-        #[arg(short, long, default_value = "claude-sonnet")]
+        #[arg(short, long, default_value = "gpt-5.2")]
         model: String,
 
         /// Show browser window (headless by default)
@@ -351,7 +351,7 @@ enum ResumeCommands {
         resume: String,
 
         /// Single AI model to use (default: claude-sonnet)
-        #[arg(long, default_value = "claude-sonnet")]
+        #[arg(long, default_value = "gpt-5.2")]
         model: String,
 
         /// Multiple AI models (comma-separated, e.g. claude-sonnet,gpt-4o)
@@ -397,7 +397,7 @@ enum GlassdoorCommands {
         force: bool,
 
         /// AI model to use
-        #[arg(short, long, default_value = "claude-sonnet")]
+        #[arg(short, long, default_value = "gpt-5.2")]
         model: String,
 
         /// Dry run - show what would be fetched without storing
