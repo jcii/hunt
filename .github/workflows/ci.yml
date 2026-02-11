@@ -31,7 +31,47 @@ jobs:
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin
       - name: Generate coverage
-        run: cargo tarpaulin --out xml --output-dir coverage/
+        run: cargo tarpaulin --out xml --out html --output-dir coverage/ 2>&1 | tee coverage/tarpaulin.log
+      - name: Write coverage to job summary
+        run: |
+          echo "## Code Coverage" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          # Extract the final coverage percentage from tarpaulin output
+          COVERAGE=$(grep -oP '\d+\.\d+% coverage' coverage/tarpaulin.log | tail -1)
+          if [ -n "$COVERAGE" ]; then
+            PCT=$(echo "$COVERAGE" | grep -oP '[\d.]+')
+            if (( $(echo "$PCT >= 80" | bc -l) )); then
+              echo "**Coverage: $COVERAGE** :green_circle:" >> $GITHUB_STEP_SUMMARY
+            elif (( $(echo "$PCT >= 50" | bc -l) )); then
+              echo "**Coverage: $COVERAGE** :yellow_circle:" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "**Coverage: $COVERAGE** :red_circle:" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          # Parse cobertura.xml for per-file breakdown
+          echo "### Per-file coverage" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| File | Line Rate | Lines |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          python3 -c "
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('coverage/cobertura.xml')
+          root = tree.getroot()
+          for pkg in root.findall('.//package'):
+              for cls in pkg.findall('.//class'):
+                  name = cls.get('filename', '?')
+                  rate = float(cls.get('line-rate', 0)) * 100
+                  lines = len(cls.findall('.//line'))
+                  if lines > 0:
+                      icon = ':green_circle:' if rate >= 80 else ':yellow_circle:' if rate >= 50 else ':red_circle:'
+                      print(f'| {name} | {icon} {rate:.1f}% | {lines} |')
+          " >> $GITHUB_STEP_SUMMARY
+      - name: Upload coverage HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: coverage/tarpaulin-report.html
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
@@ -39,8 +79,3 @@ jobs:
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-      - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: coverage/
