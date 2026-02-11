@@ -233,6 +233,9 @@ enum Commands {
         employer: Option<String>,
     },
 
+    /// Check external dependencies (geckodriver, Firefox, etc.)
+    Check,
+
     /// Run full refresh pipeline: email → fetch → keywords
     Refresh {
         /// Gmail address
@@ -1626,6 +1629,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Fetch { id, all, force, limit, delay, include_closed, no_headless } => {
+            require_browser_deps()?;
             let headless = !no_headless;
             db.ensure_initialized()?;
 
@@ -2114,7 +2118,12 @@ fn main() -> Result<()> {
             tui::run_browse(&db, status.as_deref(), employer.as_deref())?;
         }
 
+        Commands::Check => {
+            run_dependency_check();
+        }
+
         Commands::Refresh { username, password_file, days, model, no_headless, delay } => {
+            require_browser_deps()?;
             let headless = !no_headless;
             db.ensure_initialized()?;
 
@@ -2246,6 +2255,115 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn check_binary(name: &str) -> Option<String> {
+    use std::process::Command;
+    let cmd = if cfg!(windows) { "where" } else { "which" };
+    Command::new(cmd)
+        .arg(name)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().lines().next().unwrap_or("").to_string())
+}
+
+fn check_gmail_password_file() -> Option<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = PathBuf::from(format!("{}/.gmail.app_password.txt", home));
+    if path.exists() {
+        Some(path.display().to_string())
+    } else {
+        None
+    }
+}
+
+fn run_dependency_check() {
+    println!("hunt dependency check\n");
+    let mut all_ok = true;
+
+    // SQLite (bundled)
+    println!("  SQLite ............. ok (bundled)");
+
+    // geckodriver
+    match check_binary("geckodriver") {
+        Some(path) => println!("  geckodriver ........ ok ({})", path),
+        None => {
+            println!("  geckodriver ........ MISSING");
+            println!("    Install: https://github.com/mozilla/geckodriver/releases");
+            println!("    Or: cargo install geckodriver");
+            all_ok = false;
+        }
+    }
+
+    // Firefox
+    let firefox_found = check_binary("firefox")
+        .or_else(|| check_binary("firefox-esr"))
+        .or_else(|| {
+            // Check snap location
+            let snap = PathBuf::from("/snap/bin/firefox");
+            if snap.exists() { Some(snap.display().to_string()) } else { None }
+        });
+    match firefox_found {
+        Some(path) => println!("  Firefox ............ ok ({})", path),
+        None => {
+            println!("  Firefox ............ MISSING");
+            println!("    Install: https://www.mozilla.org/firefox/");
+            all_ok = false;
+        }
+    }
+
+    // Gmail password file
+    match check_gmail_password_file() {
+        Some(path) => println!("  Gmail password ..... ok ({})", path),
+        None => {
+            println!("  Gmail password ..... not found (~/.gmail.app_password.txt)");
+            println!("    Needed for: hunt email, hunt refresh");
+            println!("    Setup: https://myaccount.google.com/apppasswords");
+            all_ok = false;
+        }
+    }
+
+    // API keys (optional)
+    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+        println!("  ANTHROPIC_API_KEY .. set");
+    } else {
+        println!("  ANTHROPIC_API_KEY .. not set (optional, for api-sonnet/api-opus models)");
+    }
+
+    if std::env::var("OPENAI_API_KEY").is_ok() {
+        println!("  OPENAI_API_KEY ..... set");
+    } else {
+        println!("  OPENAI_API_KEY ..... not set (optional, for gpt-5.2/gpt-4o models)");
+    }
+
+    println!();
+    if all_ok {
+        println!("All required dependencies found.");
+    } else {
+        println!("Some dependencies are missing. Commands needing them will fail.");
+        println!("  geckodriver + Firefox: hunt fetch, hunt refresh");
+        println!("  Gmail password: hunt email, hunt refresh");
+    }
+}
+
+fn require_browser_deps() -> Result<()> {
+    let mut missing = Vec::new();
+    if check_binary("geckodriver").is_none() {
+        missing.push("geckodriver (install from https://github.com/mozilla/geckodriver/releases)");
+    }
+    let has_firefox = check_binary("firefox").is_some()
+        || check_binary("firefox-esr").is_some()
+        || PathBuf::from("/snap/bin/firefox").exists();
+    if !has_firefox {
+        missing.push("Firefox (install from https://www.mozilla.org/firefox/)");
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!("Missing required dependencies:\n  - {}\n\nRun 'hunt check' to see all dependency status.", missing.join("\n  - ")))
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
