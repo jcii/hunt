@@ -2753,4 +2753,300 @@ mod tests {
         };
         assert_eq!(stats.total(), 51);
     }
+
+    #[test]
+    fn test_add_job_parses_content() -> Result<()> {
+        let db = create_test_db()?;
+        let id = db.add_job("Senior DevOps Engineer at Google\n$150k-$200k\nJob ID: JR12345\nKubernetes, AWS required")?;
+        let job = db.get_job(id)?.unwrap();
+        assert_eq!(job.title, "Senior DevOps Engineer at Google");
+        assert_eq!(job.employer_name, Some("Google".to_string()));
+        assert_eq!(job.pay_min, Some(150000));
+        assert_eq!(job.pay_max, Some(200000));
+        assert_eq!(job.job_code, Some("JR12345".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_add_job_creates_snapshot() -> Result<()> {
+        let db = create_test_db()?;
+        let id = db.add_job("Test job content")?;
+        let count: i64 = db.conn.query_row(
+            "SELECT COUNT(*) FROM job_snapshots WHERE job_id = ?1", [id], |row| row.get(0),
+        )?;
+        assert_eq!(count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_best_fit_analysis() -> Result<()> {
+        let db = create_test_db()?;
+        let resume_id = db.create_base_resume("test", "markdown", "content", None)?;
+        let job_id = db.add_job_full("Test Job", Some("Acme"), None, None, None, None, None)?;
+        let matches_a = vec!["Python".to_string()];
+        let gaps_a = vec!["Java".to_string()];
+        let stretch_a = vec!["Go".to_string()];
+        db.save_fit_analysis(job_id, resume_id, "model-a", 65.0, &matches_a, &gaps_a, &stretch_a, "Decent fit")?;
+        let matches_b = vec!["Kubernetes".to_string()];
+        let gaps_b = vec!["Rust".to_string()];
+        let stretch_b = vec!["C++".to_string()];
+        db.save_fit_analysis(job_id, resume_id, "model-b", 85.0, &matches_b, &gaps_b, &stretch_b, "Great fit")?;
+        let best = db.get_best_fit_analysis(job_id)?.unwrap();
+        assert!((best.fit_score - 85.0).abs() < 0.1);
+        assert!(best.narrative.contains("Great fit"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_best_fit_analysis_none() -> Result<()> {
+        let db = create_test_db()?;
+        let result = db.get_best_fit_analysis(999)?;
+        assert!(result.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_fit_analysis_specific() -> Result<()> {
+        let db = create_test_db()?;
+        let resume_id = db.create_base_resume("test", "markdown", "content", None)?;
+        let job_id = db.add_job_full("Test Job", Some("Acme"), None, None, None, None, None)?;
+        let matches = vec!["AWS".to_string()];
+        let gaps = vec!["Java".to_string()];
+        let stretch = vec!["Go".to_string()];
+        db.save_fit_analysis(job_id, resume_id, "model-a", 70.0, &matches, &gaps, &stretch, "Good")?;
+        let result = db.get_fit_analysis(job_id, resume_id, "model-a")?;
+        assert!(result.is_some());
+        let analysis = result.unwrap();
+        assert!((analysis.fit_score - 70.0).abs() < 0.1);
+        // Non-existent model
+        let result = db.get_fit_analysis(job_id, resume_id, "model-z")?;
+        assert!(result.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_base_resume() -> Result<()> {
+        let db = create_test_db()?;
+        let id = db.create_base_resume("original", "markdown", "old content", None)?;
+        db.update_base_resume(id, Some("updated"), Some("latex"), Some("new content"), Some("notes"))?;
+        let resume = db.get_base_resume(id)?.unwrap();
+        assert_eq!(resume.name, "updated");
+        assert_eq!(resume.format, "latex");
+        assert_eq!(resume.content, "new content");
+        assert_eq!(resume.notes, Some("notes".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_base_resume_partial() -> Result<()> {
+        let db = create_test_db()?;
+        let id = db.create_base_resume("name", "markdown", "content", None)?;
+        db.update_base_resume(id, None, None, Some("new content only"), None)?;
+        let resume = db.get_base_resume(id)?.unwrap();
+        assert_eq!(resume.name, "name"); // unchanged
+        assert_eq!(resume.content, "new content only");
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_base_resume_noop() -> Result<()> {
+        let db = create_test_db()?;
+        let id = db.create_base_resume("name", "markdown", "content", None)?;
+        // All None should be a no-op
+        db.update_base_resume(id, None, None, None, None)?;
+        let resume = db.get_base_resume(id)?.unwrap();
+        assert_eq!(resume.name, "name");
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_resume_variant() -> Result<()> {
+        let db = create_test_db()?;
+        let resume_id = db.create_base_resume("test", "markdown", "content", None)?;
+        let job_id = db.add_job_full("Job", Some("Co"), None, None, None, None, None)?;
+        db.create_resume_variant(resume_id, job_id, "tailored content", Some("notes"), Some("claude-sonnet"), Some("markdown"))?;
+        let variant = db.get_resume_variant(job_id, resume_id)?.unwrap();
+        assert_eq!(variant.content, "tailored content");
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_resume_variant_none() -> Result<()> {
+        let db = create_test_db()?;
+        let result = db.get_resume_variant(999, 999)?;
+        assert!(result.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_resume_variants_for_job() -> Result<()> {
+        let db = create_test_db()?;
+        let resume_id = db.create_base_resume("test", "markdown", "content", None)?;
+        let job_id = db.add_job_full("Job", Some("Co"), None, None, None, None, None)?;
+        db.create_resume_variant(resume_id, job_id, "v1", None, Some("claude-sonnet"), Some("markdown"))?;
+        db.create_resume_variant(resume_id, job_id, "v2", None, Some("gpt-5.2"), Some("markdown"))?;
+        let variants = db.list_resume_variants_for_job(job_id)?;
+        assert_eq!(variants.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_recent_review_count() -> Result<()> {
+        let db = create_test_db()?;
+        let eid = db.get_or_create_employer("Test Co")?;
+        db.add_glassdoor_review(eid, 4.0, Some("Good"), Some("pros"), Some("cons"), None, "positive", Some("2025-06-01"))?;
+        db.add_glassdoor_review(eid, 2.0, Some("Bad"), Some("pros"), Some("cons"), None, "negative", Some("2024-01-01"))?;
+        let count = db.get_recent_review_count(eid, "2025-01-01")?;
+        assert_eq!(count, 1);
+        let count_all = db.get_recent_review_count(eid, "2023-01-01")?;
+        assert_eq!(count_all, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_employers_with_glassdoor() -> Result<()> {
+        let db = create_test_db()?;
+        let eid = db.get_or_create_employer("Reviewed Co")?;
+        db.add_glassdoor_review(eid, 4.0, Some("Good"), Some("pros"), Some("cons"), None, "positive", None)?;
+        db.update_employer_glassdoor_summary(eid)?;
+        let employers = db.list_employers_with_glassdoor()?;
+        assert_eq!(employers.len(), 1);
+        assert_eq!(employers[0].name, "Reviewed Co");
+        Ok(())
+    }
+
+    #[test]
+    fn test_is_duplicate_job_no_employer() -> Result<()> {
+        let db = create_test_db()?;
+        db.add_job_full("DevOps Engineer", Some("Google"), None, None, None, None, None)?;
+        // Without employer, only URL matching works
+        let result = db.is_duplicate_job("DevOps Engineer", None, None)?;
+        assert!(result.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_employer_status() -> Result<()> {
+        let db = create_test_db()?;
+        let eid = db.get_or_create_employer("Test Co")?;
+        let status = db.get_employer_status(eid)?;
+        assert_eq!(status, "ok");
+        db.set_employer_status("Test Co", "yuck")?;
+        let status = db.get_employer_status(eid)?;
+        assert_eq!(status, "yuck");
+        Ok(())
+    }
+
+    #[test]
+    fn test_calculate_score_with_pay() -> Result<()> {
+        let db = create_test_db()?;
+        let job_id = db.add_job_full("Engineer", Some("Acme"), None, None, None, Some(200000), None)?;
+        let job = db.get_job(job_id)?.unwrap();
+        let score = calculate_score(&job, &db);
+        // Base 50 + status bonus 5 (new) + pay bonus (200k is high)
+        assert!(score > 50.0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_calculate_score_reviewing_status() -> Result<()> {
+        let db = create_test_db()?;
+        let job_id = db.add_job_full("Engineer", Some("Acme"), None, None, None, None, None)?;
+        db.update_job_status(job_id, "reviewing")?;
+        let job = db.get_job(job_id)?.unwrap();
+        let score = calculate_score(&job, &db);
+        // Base 50 + reviewing bonus 10
+        assert!((score - 60.0).abs() < 0.1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_extract_pay_range_single_value() {
+        let (min, max) = extract_pay_range("Salary: $150,000");
+        assert_eq!(min, Some(150000));
+        assert!(max.is_none() || max == Some(150000));
+    }
+
+    #[test]
+    fn test_extract_pay_range_hourly() {
+        // $50 is < 1000, so the parser interprets it as $50k (50000)
+        let (min, _max) = extract_pay_range("$50/hr - $75/hr");
+        // Parser multiplies small numbers by 1000
+        assert_eq!(min, Some(50000));
+    }
+
+    #[test]
+    fn test_extract_job_code_req() {
+        let code = extract_job_code("Apply now. Req#: REQ-2025-0042. Equal opportunity employer.");
+        assert_eq!(code, Some("REQ-2025-0042".to_string()));
+    }
+
+    #[test]
+    fn test_extract_job_code_requisition() {
+        let code = extract_job_code("Requisition ID: 12345-ABC");
+        assert_eq!(code, Some("12345-ABC".to_string()));
+    }
+
+    #[test]
+    fn test_extract_job_code_reference_pattern() {
+        // "reference:" is a recognized prefix pattern
+        let code = extract_job_code("Reference: R98765 for this position");
+        assert_eq!(code, Some("R98765".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_title_trims_and_lowercases_input() {
+        // normalize_title only trims outer whitespace and lowercases; internal spaces preserved
+        assert_eq!(normalize_title("  Senior DevOps Engineer  "), "senior devops engineer");
+    }
+
+    #[test]
+    fn test_get_base_resume_not_found() -> Result<()> {
+        let db = create_test_db()?;
+        let result = db.get_base_resume(999)?;
+        assert!(result.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_base_resume_by_name_not_found() -> Result<()> {
+        let db = create_test_db()?;
+        let result = db.get_base_resume_by_name("nonexistent")?;
+        assert!(result.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_resume_variant_upsert() -> Result<()> {
+        let db = create_test_db()?;
+        let resume_id = db.create_base_resume("test", "markdown", "content", None)?;
+        let job_id = db.add_job_full("Job", Some("Co"), None, None, None, None, None)?;
+        db.create_resume_variant(resume_id, job_id, "v1", None, Some("claude"), Some("md"))?;
+        // Upsert with same key should update content
+        db.create_resume_variant(resume_id, job_id, "v2-updated", Some("new notes"), Some("claude"), Some("md"))?;
+        let variants = db.list_resume_variants_for_job(job_id)?;
+        assert_eq!(variants.len(), 1);
+        assert_eq!(variants[0].content, "v2-updated");
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_job_description_updates_pay() -> Result<()> {
+        let db = create_test_db()?;
+        let id = db.add_job_full("Job", Some("Co"), None, None, None, None, None)?;
+        db.update_job_description(id, "Updated description", Some(100000), Some(150000))?;
+        let job = db.get_job(id)?.unwrap();
+        assert_eq!(job.pay_min, Some(100000));
+        assert_eq!(job.pay_max, Some(150000));
+        assert!(job.raw_text.unwrap().contains("Updated description"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_ensure_initialized() -> Result<()> {
+        let db = create_test_db()?;
+        // Should succeed since create_test_db calls init
+        db.ensure_initialized()?;
+        Ok(())
+    }
 }

@@ -677,6 +677,7 @@ pub fn tailor_resume_full(
     provider.complete(&prompt, 8192)
 }
 
+#[derive(Debug)]
 pub struct GlassdoorReviewData {
     pub rating: f64,
     pub title: String,
@@ -686,6 +687,7 @@ pub struct GlassdoorReviewData {
     pub review_date: String,
 }
 
+#[derive(Debug)]
 pub struct GlassdoorResearch {
     pub reviews: Vec<GlassdoorReviewData>,
 }
@@ -926,5 +928,255 @@ mod tests {
         let spec = resolve_model("gpt5-pro").unwrap();
         assert_eq!(spec.model_id, "gpt-5.2-pro");
         assert!(matches!(spec.provider, ProviderKind::OpenAI));
+    }
+
+    // --- Mock AIProvider for testing parsing logic ---
+
+    struct MockProvider {
+        response: String,
+    }
+
+    impl MockProvider {
+        fn new(response: &str) -> Self {
+            Self { response: response.to_string() }
+        }
+    }
+
+    impl AIProvider for MockProvider {
+        fn complete(&self, _prompt: &str, _max_tokens: u32) -> Result<String> {
+            Ok(self.response.clone())
+        }
+        fn model_name(&self) -> &str { "mock" }
+    }
+
+    #[test]
+    fn test_analyze_job_returns_response() {
+        let provider = MockProvider::new("Analysis: This is a senior role requiring Kubernetes.");
+        let result = analyze_job(&provider, "Senior DevOps Engineer needed").unwrap();
+        assert!(result.contains("senior role"));
+    }
+
+    #[test]
+    fn test_extract_keywords_parses_csv() {
+        let provider = MockProvider::new("Kubernetes, Python, Terraform, AWS, Docker");
+        let result = extract_keywords(&provider, "job text").unwrap();
+        assert_eq!(result.len(), 5);
+        assert_eq!(result[0], "Kubernetes");
+        assert_eq!(result[4], "Docker");
+    }
+
+    #[test]
+    fn test_extract_keywords_handles_whitespace() {
+        let provider = MockProvider::new("  Kubernetes , Python  ,  , Terraform  ");
+        let result = extract_keywords(&provider, "job text").unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], "Kubernetes");
+    }
+
+    #[test]
+    fn test_extract_domain_keywords_full_response() {
+        let provider = MockProvider::new(
+            "TECH: Kubernetes/3, Python/2, dbt/1\n\
+             DISCIPLINE: DevOps/3, SRE/2, Agile/1\n\
+             CLOUD: AWS/3, Azure/1\n\
+             SOFT_SKILL: leadership/3, communication/2\n\
+             PROFILE: Tech-heavy infrastructure role."
+        );
+        let result = extract_domain_keywords(&provider, "job text").unwrap();
+        assert_eq!(result.tech.len(), 3);
+        assert_eq!(result.tech[0].0, "Kubernetes");
+        assert_eq!(result.tech[0].1, 3);
+        assert_eq!(result.discipline.len(), 3);
+        assert_eq!(result.cloud.len(), 2);
+        assert_eq!(result.soft_skill.len(), 2);
+        assert_eq!(result.profile, "Tech-heavy infrastructure role.");
+    }
+
+    #[test]
+    fn test_extract_domain_keywords_cross_domain_dedup() {
+        let provider = MockProvider::new(
+            "TECH: AWS/3, Python/2\n\
+             DISCIPLINE: DevOps/3\n\
+             CLOUD: AWS/2\n\
+             SOFT_SKILL: leadership/3\n\
+             PROFILE: Test."
+        );
+        let result = extract_domain_keywords(&provider, "job text").unwrap();
+        // AWS should only appear in TECH (first seen)
+        assert!(result.tech.iter().any(|(k, _)| k == "AWS"));
+        assert!(!result.cloud.iter().any(|(k, _)| k.to_lowercase() == "aws"));
+    }
+
+    #[test]
+    fn test_extract_domain_keywords_empty_response() {
+        let provider = MockProvider::new("");
+        let result = extract_domain_keywords(&provider, "job text").unwrap();
+        assert!(result.tech.is_empty());
+        assert!(result.discipline.is_empty());
+        assert!(result.cloud.is_empty());
+        assert!(result.soft_skill.is_empty());
+        assert!(result.profile.is_empty());
+    }
+
+    #[test]
+    fn test_extract_domain_keywords_partial_response() {
+        let provider = MockProvider::new(
+            "TECH: Rust/3, Go/2\n\
+             PROFILE: Systems programming role."
+        );
+        let result = extract_domain_keywords(&provider, "job text").unwrap();
+        assert_eq!(result.tech.len(), 2);
+        assert!(result.discipline.is_empty());
+        assert!(result.cloud.is_empty());
+        assert!(result.soft_skill.is_empty());
+        assert_eq!(result.profile, "Systems programming role.");
+    }
+
+    #[test]
+    fn test_analyze_fit_parses_response() {
+        let provider = MockProvider::new(
+            "SCORE: 75\n\
+             STRONG_MATCHES: Kubernetes, Python, AWS\n\
+             GAPS: Java, Spring Boot\n\
+             STRETCH_AREAS: system design, distributed systems\n\
+             NARRATIVE:\n\
+             Strong fit for this role. The candidate has extensive cloud experience.\n\
+             Some gaps in Java ecosystem but transferable skills are solid."
+        );
+        let result = analyze_fit(&provider, "my resume", "job text", "DevOps Engineer").unwrap();
+        assert!((result.fit_score - 75.0).abs() < 0.1);
+        assert_eq!(result.strong_matches.len(), 3);
+        assert_eq!(result.strong_matches[0], "Kubernetes");
+        assert_eq!(result.gaps.len(), 2);
+        assert_eq!(result.gaps[0], "Java");
+        assert_eq!(result.stretch_areas.len(), 2);
+        assert!(result.narrative.contains("Strong fit"));
+        assert!(result.narrative.contains("gaps in Java"));
+    }
+
+    #[test]
+    fn test_analyze_fit_empty_sections() {
+        let provider = MockProvider::new(
+            "SCORE: 50\n\
+             STRONG_MATCHES:\n\
+             GAPS:\n\
+             STRETCH_AREAS:\n\
+             NARRATIVE:\n\
+             Average fit."
+        );
+        let result = analyze_fit(&provider, "resume", "job", "Title").unwrap();
+        assert!((result.fit_score - 50.0).abs() < 0.1);
+        assert!(result.strong_matches.is_empty());
+        assert!(result.gaps.is_empty());
+        assert!(result.stretch_areas.is_empty());
+        assert!(result.narrative.contains("Average fit"));
+    }
+
+    #[test]
+    fn test_analyze_fit_bad_score_defaults_zero() {
+        let provider = MockProvider::new(
+            "SCORE: not-a-number\n\
+             STRONG_MATCHES: Python\n\
+             GAPS: Java\n\
+             STRETCH_AREAS: Go\n\
+             NARRATIVE:\n\
+             Test."
+        );
+        let result = analyze_fit(&provider, "resume", "job", "Title").unwrap();
+        assert!((result.fit_score - 0.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_tailor_resume_suggestions_returns_response() {
+        let provider = MockProvider::new("Emphasize Kubernetes experience. Add more AWS keywords.");
+        let result = tailor_resume_suggestions(&provider, "resume", "job text", "DevOps").unwrap();
+        assert!(result.contains("Kubernetes"));
+    }
+
+    #[test]
+    fn test_tailor_resume_full_markdown() {
+        let provider = MockProvider::new("# John Doe\n## Experience\n- DevOps at Acme");
+        let resumes = vec![("main".to_string(), "John Doe resume content".to_string())];
+        let result = tailor_resume_full(&provider, &resumes, "job text", "DevOps", Some("Acme"), "markdown").unwrap();
+        assert!(result.contains("John Doe"));
+    }
+
+    #[test]
+    fn test_tailor_resume_full_latex() {
+        let provider = MockProvider::new("\\documentclass{article}\n\\begin{document}\nJohn Doe\n\\end{document}");
+        let resumes = vec![
+            ("main".to_string(), "primary resume".to_string()),
+            ("extra".to_string(), "secondary resume".to_string()),
+        ];
+        let result = tailor_resume_full(&provider, &resumes, "job text", "DevOps", None, "latex").unwrap();
+        assert!(result.contains("\\documentclass"));
+    }
+
+    #[test]
+    fn test_research_glassdoor_parses_reviews() {
+        let provider = MockProvider::new(
+            "REVIEW: 4.2 | positive | 2025-06-15 | Great culture | Good WLB, smart peers | Slow promotions\n\
+             REVIEW: 2.5 | negative | 2025-03-10 | Burnout city | Good pay | Terrible management, 60hr weeks\n\
+             REVIEW: 3.0 | neutral | 2025-01-20 | It's fine | Decent benefits | Nothing special"
+        );
+        let result = research_glassdoor(&provider, "Acme Corp").unwrap();
+        assert_eq!(result.reviews.len(), 3);
+        assert!((result.reviews[0].rating - 4.2).abs() < 0.01);
+        assert_eq!(result.reviews[0].sentiment, "positive");
+        assert_eq!(result.reviews[0].title, "Great culture");
+        assert_eq!(result.reviews[0].pros, "Good WLB, smart peers");
+        assert_eq!(result.reviews[0].cons, "Slow promotions");
+        assert_eq!(result.reviews[1].sentiment, "negative");
+        assert!((result.reviews[2].rating - 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_research_glassdoor_unknown() {
+        let provider = MockProvider::new("UNKNOWN");
+        let result = research_glassdoor(&provider, "Mystery Corp");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_research_glassdoor_empty() {
+        let provider = MockProvider::new("");
+        let result = research_glassdoor(&provider, "Empty Corp");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_research_glassdoor_bad_sentiment_inferred() {
+        let provider = MockProvider::new(
+            "REVIEW: 4.5 | xyz | 2025-01-01 | Title | Pros | Cons\n\
+             REVIEW: 1.5 | abc | 2025-01-01 | Title2 | Pros2 | Cons2"
+        );
+        let result = research_glassdoor(&provider, "Test Corp").unwrap();
+        // Rating >= 4.0 with invalid sentiment -> "positive"
+        assert_eq!(result.reviews[0].sentiment, "positive");
+        // Rating <= 2.0 with invalid sentiment -> "negative"
+        assert_eq!(result.reviews[1].sentiment, "negative");
+    }
+
+    #[test]
+    fn test_research_glassdoor_rating_clamped() {
+        let provider = MockProvider::new(
+            "REVIEW: 10.0 | positive | 2025-01-01 | Title | Pros | Cons\n\
+             REVIEW: -1.0 | negative | 2025-01-01 | Title2 | Pros2 | Cons2"
+        );
+        let result = research_glassdoor(&provider, "Test Corp").unwrap();
+        assert!((result.reviews[0].rating - 5.0).abs() < 0.01);
+        assert!((result.reviews[1].rating - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_research_glassdoor_skips_malformed_lines() {
+        let provider = MockProvider::new(
+            "Some random text\n\
+             REVIEW: 4.0 | positive | 2025-01-01 | Title | Pros | Cons\n\
+             REVIEW: bad line with too few parts\n\
+             Another random line"
+        );
+        let result = research_glassdoor(&provider, "Test Corp").unwrap();
+        assert_eq!(result.reviews.len(), 1);
     }
 }

@@ -965,4 +965,207 @@ mod tests {
         assert_eq!(title, "Senior Engineer, Remote");
         assert_eq!(company, None);
     }
+
+    #[test]
+    fn test_parse_linkedin_email_with_job_links() {
+        let html = r#"<html><body>
+            <a href="https://www.linkedin.com/comm/jobs/view/12345?tracking=xyz">
+                Staff DevOps Engineer, DevInfra             SandboxAQ · United States (Remote)
+            </a>
+            <a href="https://www.linkedin.com/comm/jobs/view/67890?tracking=abc">
+                Senior Platform Engineer             Sully.ai · Mountain View, CA
+            </a>
+        </body></html>"#;
+        let result = parse_linkedin_email("Job alerts", html).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].title, "Staff DevOps Engineer, DevInfra");
+        assert_eq!(result[0].employer, Some("SandboxAQ".to_string()));
+        assert_eq!(result[0].url, Some("https://www.linkedin.com/comm/jobs/view/12345".to_string()));
+        assert_eq!(result[0].source, "linkedin");
+        assert_eq!(result[1].title, "Senior Platform Engineer");
+        assert_eq!(result[1].employer, Some("Sully.ai".to_string()));
+    }
+
+    #[test]
+    fn test_parse_linkedin_email_filters_search_links() {
+        let html = r#"<html><body>
+            <a href="https://www.linkedin.com/comm/jobs/search?keywords=DevOps">Search DevOps</a>
+            <a href="https://www.linkedin.com/comm/jobs/view/11111">
+                Senior SRE             Google · New York, NY
+            </a>
+            <a href="https://www.linkedin.com/comm/jobs/alerts">View all alerts</a>
+        </body></html>"#;
+        let result = parse_linkedin_email("alerts", html).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].title, "Senior SRE");
+    }
+
+    #[test]
+    fn test_parse_linkedin_email_filters_artifacts() {
+        let html = r#"<html><body>
+            <a href="https://www.linkedin.com/comm/jobs/view/111">Jobs</a>
+            <a href="https://www.linkedin.com/comm/jobs/view/222">View all</a>
+            <a href="https://www.linkedin.com/comm/jobs/view/333">
+                Cloud Infrastructure Engineer             Netflix · Los Gatos, CA
+            </a>
+        </body></html>"#;
+        let result = parse_linkedin_email("alerts", html).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].title, "Cloud Infrastructure Engineer");
+    }
+
+    #[test]
+    fn test_parse_linkedin_email_deduplicates() {
+        let html = r#"<html><body>
+            <a href="https://www.linkedin.com/comm/jobs/view/111">
+                DevOps Engineer             Acme · Remote
+            </a>
+            <a href="https://www.linkedin.com/comm/jobs/view/222">
+                DevOps Engineer             Acme · Remote
+            </a>
+        </body></html>"#;
+        let result = parse_linkedin_email("alerts", html).unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_linkedin_email_fallback_to_text() {
+        // No linkedin job links, should fall back to extract_jobs_from_text
+        let html = r#"<html><body>
+            <p>New job: Senior Software Engineer at Google</p>
+        </body></html>"#;
+        let result = parse_linkedin_email("alerts", html).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result[0].title.contains("Software Engineer"));
+    }
+
+    #[test]
+    fn test_parse_indeed_email_with_viewjob() {
+        let html = r#"<html><body>
+            <a href="https://www.indeed.com/viewjob?jk=abc123&tk=456">
+                Senior DevOps Engineer at Amazon
+            </a>
+            <a href="https://www.indeed.com/rc/clk?jk=def456">
+                Platform Engineer - Netflix
+            </a>
+        </body></html>"#;
+        let result = parse_indeed_email("Indeed alerts", html).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].title, "Senior DevOps Engineer");
+        assert_eq!(result[0].employer, Some("Amazon".to_string()));
+        assert_eq!(result[0].url, Some("https://www.indeed.com/viewjob".to_string()));
+        assert_eq!(result[0].source, "indeed");
+        assert_eq!(result[1].title, "Platform Engineer");
+        assert_eq!(result[1].employer, Some("Netflix".to_string()));
+    }
+
+    #[test]
+    fn test_parse_indeed_email_filters_search() {
+        let html = r#"<html><body>
+            <a href="https://www.indeed.com/jobs/search?q=engineer">Search engineers</a>
+            <a href="https://www.indeed.com/viewjob?jk=real123">
+                Cloud Engineer at AWS
+            </a>
+        </body></html>"#;
+        let result = parse_indeed_email("alerts", html).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].title, "Cloud Engineer");
+    }
+
+    #[test]
+    fn test_parse_indeed_email_no_job_links() {
+        let html = r#"<html><body>
+            <a href="https://www.indeed.com/account/settings">Settings</a>
+        </body></html>"#;
+        let result = parse_indeed_email("alerts", html).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_indeed_email_deduplicates() {
+        let html = r#"<html><body>
+            <a href="https://www.indeed.com/viewjob?jk=111">DevOps Engineer at Acme</a>
+            <a href="https://www.indeed.com/viewjob?jk=222">DevOps Engineer at Acme</a>
+        </body></html>"#;
+        let result = parse_indeed_email("alerts", html).unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_get_email_body_single_part() {
+        let raw = b"From: test@example.com\r\nSubject: Test\r\nContent-Type: text/plain\r\n\r\nHello World";
+        let parsed = mailparse::parse_mail(raw).unwrap();
+        let body = get_email_body(&parsed).unwrap();
+        assert!(body.contains("Hello World"));
+    }
+
+    #[test]
+    fn test_get_email_body_multipart_prefers_html() {
+        let raw = b"From: test@example.com\r\n\
+Subject: Test\r\n\
+Content-Type: multipart/alternative; boundary=\"boundary\"\r\n\
+\r\n\
+--boundary\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+Plain text\r\n\
+--boundary\r\n\
+Content-Type: text/html\r\n\
+\r\n\
+<html>HTML content</html>\r\n\
+--boundary--";
+        let parsed = mailparse::parse_mail(raw).unwrap();
+        let body = get_email_body(&parsed).unwrap();
+        assert!(body.contains("HTML content"));
+    }
+
+    #[test]
+    fn test_get_email_body_multipart_falls_back_to_plain() {
+        let raw = b"From: test@example.com\r\n\
+Subject: Test\r\n\
+Content-Type: multipart/mixed; boundary=\"boundary\"\r\n\
+\r\n\
+--boundary\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+Plain text body\r\n\
+--boundary\r\n\
+Content-Type: application/pdf\r\n\
+\r\n\
+PDF bytes\r\n\
+--boundary--";
+        let parsed = mailparse::parse_mail(raw).unwrap();
+        let body = get_email_body(&parsed).unwrap();
+        assert!(body.contains("Plain text body"));
+    }
+
+    #[test]
+    fn test_clean_tracking_url_preserves_path() {
+        assert_eq!(
+            clean_tracking_url("https://www.linkedin.com/comm/jobs/view/4210614397"),
+            Some("https://www.linkedin.com/comm/jobs/view/4210614397".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_title_at_company_dash_pattern() {
+        let (title, company) = parse_title_at_company("DevOps Lead - Amazon");
+        assert_eq!(title, "DevOps Lead");
+        assert_eq!(company, Some("Amazon".to_string()));
+    }
+
+    #[test]
+    fn test_parse_title_at_company_dash_skips_engineer_suffix() {
+        // "- Engineer" looks like part of a title, not a company
+        let (title, company) = parse_title_at_company("Senior Platform - Engineer");
+        assert_eq!(title, "Senior Platform - Engineer");
+        assert_eq!(company, None);
+    }
+
+    #[test]
+    fn test_parse_title_at_company_hybrid_comma() {
+        let (title, company) = parse_title_at_company("Senior Engineer, Hybrid");
+        assert_eq!(title, "Senior Engineer, Hybrid");
+        assert_eq!(company, None);
+    }
 }

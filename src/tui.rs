@@ -656,3 +656,103 @@ fn build_detail<'a>(state: &'a AppState) -> Text<'a> {
 
     Text::from(lines)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_str_short() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_exact() {
+        assert_eq!(truncate_str("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_long() {
+        assert_eq!(truncate_str("hello world", 7), "hello..");
+    }
+
+    #[test]
+    fn test_truncate_str_very_short_max() {
+        assert_eq!(truncate_str("hello", 2), "he");
+        assert_eq!(truncate_str("hello", 1), "h");
+        assert_eq!(truncate_str("hello", 0), "");
+    }
+
+    #[test]
+    fn test_truncate_str_empty() {
+        assert_eq!(truncate_str("", 5), "");
+    }
+
+    #[test]
+    fn test_format_pay_high() {
+        let job = Job {
+            id: 1, employer_id: None, employer_name: None,
+            title: "Test".to_string(), url: None, source: None,
+            status: "new".to_string(), raw_text: None,
+            pay_min: Some(150000), pay_max: Some(200000),
+            job_code: None, fetched_at: None, created_at: String::new(), updated_at: String::new(),
+        };
+        assert_eq!(format_pay(&job), "$200k");
+    }
+
+    #[test]
+    fn test_format_pay_max_only() {
+        let job = Job {
+            id: 1, employer_id: None, employer_name: None,
+            title: "Test".to_string(), url: None, source: None,
+            status: "new".to_string(), raw_text: None,
+            pay_min: None, pay_max: Some(175000),
+            job_code: None, fetched_at: None, created_at: String::new(), updated_at: String::new(),
+        };
+        assert_eq!(format_pay(&job), "$175k");
+    }
+
+    #[test]
+    fn test_format_pay_min_only() {
+        let job = Job {
+            id: 1, employer_id: None, employer_name: None,
+            title: "Test".to_string(), url: None, source: None,
+            status: "new".to_string(), raw_text: None,
+            pay_min: Some(120000), pay_max: None,
+            job_code: None, fetched_at: None, created_at: String::new(), updated_at: String::new(),
+        };
+        assert_eq!(format_pay(&job), "$120k");
+    }
+
+    #[test]
+    fn test_format_pay_none() {
+        let job = Job {
+            id: 1, employer_id: None, employer_name: None,
+            title: "Test".to_string(), url: None, source: None,
+            status: "new".to_string(), raw_text: None,
+            pay_min: None, pay_max: None,
+            job_code: None, fetched_at: None, created_at: String::new(), updated_at: String::new(),
+        };
+        assert_eq!(format_pay(&job), "   - ");
+    }
+
+    #[test]
+    fn test_format_pay_small_value() {
+        let job = Job {
+            id: 1, employer_id: None, employer_name: None,
+            title: "Test".to_string(), url: None, source: None,
+            status: "new".to_string(), raw_text: None,
+            pay_min: None, pay_max: Some(500),
+            job_code: None, fetched_at: None, created_at: String::new(), updated_at: String::new(),
+        };
+        assert_eq!(format_pay(&job), "$ 500");
+    }
+
+    #[test]
+    fn test_sort_field_label() {
+        assert_eq!(SortField::Score.label(), "Score");
+        assert_eq!(SortField::Salary.label(), "Salary");
+        assert_eq!(SortField::Fit.label(), "Fit");
+        assert_eq!(SortField::Company.label(), "Company");
+    }
+}
