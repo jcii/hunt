@@ -13,6 +13,25 @@ use std::io::stdout;
 use crate::db::{self, Database};
 use crate::models::{FitAnalysis, Job, JobKeyword, JobKeywordProfile};
 
+#[derive(Clone, Copy, PartialEq)]
+enum SortField {
+    Score,
+    Salary,
+    Fit,
+    Company,
+}
+
+impl SortField {
+    fn label(self) -> &'static str {
+        match self {
+            SortField::Score => "Score",
+            SortField::Salary => "Salary",
+            SortField::Fit => "Fit",
+            SortField::Company => "Company",
+        }
+    }
+}
+
 struct AppState {
     jobs: Vec<Job>,
     scores: Vec<f64>,              // ranking score per job (parallel to jobs)
@@ -27,6 +46,8 @@ struct AppState {
     search_active: bool,
     search_query: String,
     hide_closed: bool,
+    sort_field: SortField,
+    sort_ascending: bool,
 }
 
 impl AppState {
@@ -50,6 +71,8 @@ impl AppState {
             search_active: false,
             search_query: String::new(),
             hide_closed: true,
+            sort_field: SortField::Score,
+            sort_ascending: false,
         };
         s.update_filter();
         s
@@ -91,9 +114,29 @@ impl AppState {
             .map(|(i, _)| i)
             .collect();
 
-        // Sort visible indices by score descending
+        // Sort visible indices by current sort field
         self.visible.sort_by(|&a, &b| {
-            self.scores[b].partial_cmp(&self.scores[a]).unwrap_or(std::cmp::Ordering::Equal)
+            let ord = match self.sort_field {
+                SortField::Score => {
+                    self.scores[a].partial_cmp(&self.scores[b]).unwrap_or(std::cmp::Ordering::Equal)
+                }
+                SortField::Salary => {
+                    let sa = self.jobs[a].pay_max.or(self.jobs[a].pay_min).unwrap_or(0);
+                    let sb = self.jobs[b].pay_max.or(self.jobs[b].pay_min).unwrap_or(0);
+                    sa.cmp(&sb)
+                }
+                SortField::Fit => {
+                    let fa = self.fit_scores[a].unwrap_or(-1.0);
+                    let fb = self.fit_scores[b].unwrap_or(-1.0);
+                    fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
+                }
+                SortField::Company => {
+                    let ca = self.jobs[a].employer_name.as_deref().unwrap_or("").to_lowercase();
+                    let cb = self.jobs[b].employer_name.as_deref().unwrap_or("").to_lowercase();
+                    ca.cmp(&cb)
+                }
+            };
+            if self.sort_ascending { ord } else { ord.reverse() }
         });
 
         if self.visible.is_empty() {
@@ -135,6 +178,17 @@ impl AppState {
 
     fn scroll_up(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_sub(3);
+    }
+
+    fn set_sort(&mut self, field: SortField) {
+        if self.sort_field == field {
+            self.sort_ascending = !self.sort_ascending;
+        } else {
+            self.sort_field = field;
+            // Company defaults ascending (A-Z), others default descending (highest first)
+            self.sort_ascending = field == SortField::Company;
+        }
+        self.update_filter();
     }
 
     fn update_current_job_status(&mut self, db: &Database, status: &str) {
@@ -264,6 +318,26 @@ fn run_loop(
                 KeyCode::Char('a') => state.update_current_job_status(db, "applied"),
                 KeyCode::Char('x') => state.update_current_job_status(db, "rejected"),
                 KeyCode::Char('c') => state.update_current_job_status(db, "closed"),
+                KeyCode::Char('1') => {
+                    state.set_sort(SortField::Score);
+                    list_state.select(Some(state.selected));
+                    state.load_keywords(db);
+                }
+                KeyCode::Char('2') => {
+                    state.set_sort(SortField::Salary);
+                    list_state.select(Some(state.selected));
+                    state.load_keywords(db);
+                }
+                KeyCode::Char('3') => {
+                    state.set_sort(SortField::Fit);
+                    list_state.select(Some(state.selected));
+                    state.load_keywords(db);
+                }
+                KeyCode::Char('4') => {
+                    state.set_sort(SortField::Company);
+                    list_state.select(Some(state.selected));
+                    state.load_keywords(db);
+                }
                 KeyCode::Char('H') => {
                     state.hide_closed = !state.hide_closed;
                     state.update_filter();
@@ -372,12 +446,15 @@ fn draw(frame: &mut Frame, state: &AppState, list_state: &mut ListState) {
         ]))
     }).collect();
 
+    let sort_arrow = if state.sort_ascending { "\u{25b2}" } else { "\u{25bc}" };
+    let sort_indicator = format!(" [{}{}]", state.sort_field.label(), sort_arrow);
+
     let list_title = if !state.search_query.is_empty() {
-        format!(" Jobs ({}/{}) \"{}\" ", state.visible.len(), state.jobs.len(), state.search_query)
+        format!(" Jobs ({}/{}) \"{}\"{} ", state.visible.len(), state.jobs.len(), state.search_query, sort_indicator)
     } else if state.visible.len() < state.jobs.len() {
-        format!(" Jobs ({}/{}) ", state.visible.len(), state.jobs.len())
+        format!(" Jobs ({}/{}){} ", state.visible.len(), state.jobs.len(), sort_indicator)
     } else {
-        format!(" Jobs ({}) ", state.jobs.len())
+        format!(" Jobs ({}){} ", state.jobs.len(), sort_indicator)
     };
 
     let list = List::new(items)
@@ -400,7 +477,7 @@ fn draw(frame: &mut Frame, state: &AppState, list_state: &mut ListState) {
     let footer_text = if state.search_active {
         format!("/{}", state.search_query)
     } else {
-        format!(" j/k:nav  ^D/^U:page  g/G:top/end  /:search  J/K:scroll  n/r/a/x/c:status  H:{}  q:quit",
+        format!(" j/k:nav  ^D/^U:page  g/G:top/end  /:search  J/K:scroll  1-4:sort  n/r/a/x/c:status  H:{}  q:quit",
             if state.hide_closed { "show closed" } else { "hide closed" })
     };
     let footer_style = if state.search_active {
