@@ -29,6 +29,12 @@
 - **Employer research** — Track startup info, public company controversies, PE/VC ownership
 - **Ranking** — Score jobs by pay, employer status, and application stage
 
+### Browse TUI
+
+<p align="center">
+  <img src="tui-example.png" alt="hunt browse TUI" />
+</p>
+
 ## Quick start
 
 ```bash
