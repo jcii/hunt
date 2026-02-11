@@ -31,7 +31,9 @@ jobs:
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin
       - name: Generate coverage
-        run: cargo tarpaulin --out xml --out html --output-dir coverage/ 2>&1 | tee coverage/tarpaulin.log
+        run: |
+          mkdir -p coverage
+          cargo tarpaulin --out xml --out html --output-dir coverage/ 2>&1 | tee coverage/tarpaulin.log
       - name: Write coverage to job summary
         run: |
           echo "## Code Coverage" >> $GITHUB_STEP_SUMMARY
