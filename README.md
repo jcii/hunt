@@ -61,7 +61,7 @@ hunt rank --limit 10
 
 ## AI-powered analysis
 
-AI commands default to `claude-sonnet` via the Claude Code CLI (no API key needed if you have a subscription). Pass `--model` to switch.
+AI commands default to `gpt-5.2` via the OpenAI API. Pass `--model` to switch.
 
 ```bash
 # Analyze a job posting
@@ -72,8 +72,13 @@ hunt keywords 5
 hunt keywords 5 --show           # view stored keywords without re-running AI
 hunt keywords --search terraform  # search across all jobs
 
-# Resume fit analysis
-hunt fit 5 --resume devops-2026
+# Resume fit analysis (considers ALL resumes + experience supplements)
+hunt fit run 5 --resume devops-2026
+hunt fit run --resume devops-2026 --all   # batch all jobs
+
+# Aggregated gaps across all fit analyses
+hunt fit gaps --resume devops-2026
+hunt fit gaps --resume devops-2026 --min-count 3
 
 # Generate a tailored resume
 hunt resume tailor 5 --resume devops-2026
@@ -86,7 +91,7 @@ hunt resume compare 5            # compare variants side by side
 Keywords are categorized into four domains with importance weights:
 
 ```
-Keywords for job #5: Engineering Manager, Infrastructure Platform (model: claude-sonnet)
+Keywords for job #5: Engineering Manager, Infrastructure Platform (model: gpt-5.2)
 
   *** = required   ** = important   * = nice-to-have
 
@@ -116,10 +121,10 @@ Keywords for job #5: Engineering Manager, Infrastructure Platform (model: claude
 
 | Short name | Provider | Notes |
 |------------|----------|-------|
-| `claude-sonnet` (default) | Claude CLI | Uses Claude Code subscription |
+| `claude-sonnet` | Claude CLI | Uses Claude Code subscription |
 | `claude-opus`, `claude-haiku` | Claude CLI | Subscription billing |
 | `api-sonnet`, `api-opus`, `api-haiku` | Anthropic API | Requires `ANTHROPIC_API_KEY` |
-| `gpt-5.2`, `gpt-4o`, `o3` | OpenAI API | Requires `OPENAI_API_KEY` |
+| `gpt-5.2` (default), `gpt-4o`, `o3` | OpenAI API | Requires `OPENAI_API_KEY` |
 
 ## Employer management
 
@@ -134,6 +139,37 @@ hunt employer ok "Redeemed Co"      # clear status
 hunt employer research "Startup Co" # YC, funding, HN mentions
 hunt employer evil "Big Corp"       # controversies, labor practices
 hunt employer ownership "Acquired"  # parent company, PE/VC
+```
+
+## Experience supplements
+
+Add context about your experience that isn't captured in any resume. This data is automatically injected into fit analysis and resume tailoring prompts.
+
+```bash
+hunt experience add "I managed K8s clusters for 5 years at Scale Corp"
+hunt experience add --file ~/old-experience.txt --category certifications
+hunt experience list
+hunt experience show 1
+hunt experience remove 1
+```
+
+## Other commands
+
+```bash
+# Browse jobs interactively in a TUI
+hunt browse
+hunt browse --status new --employer "Acme"
+
+# Check external dependencies (geckodriver, Firefox, etc.)
+hunt check
+
+# Run full refresh pipeline: email -> fetch -> keywords
+hunt refresh
+
+# Glassdoor reviews
+hunt glassdoor fetch
+hunt glassdoor list
+hunt glassdoor show "Acme Corp"
 ```
 
 ## Data management
@@ -159,6 +195,7 @@ hunt destroy --confirm              # actually wipe
 | `models.rs` | Data structs (`Job`, `Employer`, `JobKeyword`, etc.) |
 | `email.rs` | IMAP ingestion, LinkedIn/Indeed HTML parsing |
 | `browser.rs` | Selenium-based job description fetching |
+| `tui.rs` | Interactive TUI browse mode (ratatui) |
 
 Database is stored at `~/.local/share/hunt/hunt.db` (XDG). Schema auto-migrates on `init` or first use.
 

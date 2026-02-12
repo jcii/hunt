@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
 
-use crate::models::{BaseResume, Employer, FitAnalysis, GlassdoorReview, Job, JobKeyword, JobKeywordProfile, ResumeVariant};
+use crate::models::{BaseResume, Employer, ExperienceSupplement, FitAnalysis, GlassdoorReview, Job, JobKeyword, JobKeywordProfile, ResumeVariant};
 
 pub struct DestructionStats {
     pub jobs: i64,
@@ -13,12 +13,14 @@ pub struct DestructionStats {
     pub job_keywords: i64,
     pub job_keyword_profiles: i64,
     pub fit_analyses: i64,
+    pub experience_supplements: i64,
 }
 
 impl DestructionStats {
     pub fn total(&self) -> i64 {
         self.jobs + self.job_snapshots + self.employers + self.base_resumes
-            + self.resume_variants + self.job_keywords + self.job_keyword_profiles + self.fit_analyses
+            + self.resume_variants + self.job_keywords + self.job_keyword_profiles
+            + self.fit_analyses + self.experience_supplements
     }
 }
 
@@ -193,6 +195,13 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_glassdoor_employer ON glassdoor_reviews(employer_id);
             CREATE INDEX IF NOT EXISTS idx_glassdoor_date ON glassdoor_reviews(review_date);
+
+            CREATE TABLE IF NOT EXISTS experience_supplements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
 
             CREATE TABLE IF NOT EXISTS job_keyword_profiles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -407,6 +416,13 @@ impl Database {
             );
 
             CREATE INDEX IF NOT EXISTS idx_fit_analyses_job ON fit_analyses(job_id);
+
+            CREATE TABLE IF NOT EXISTS experience_supplements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
             "#,
         )?;
 
@@ -1574,6 +1590,119 @@ impl Database {
         }
     }
 
+    // --- Experience Supplement operations ---
+
+    pub fn add_experience_supplement(&self, category: Option<&str>, content: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO experience_supplements (category, content) VALUES (?1, ?2)",
+            params![category, content],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_experience_supplements(&self) -> Result<Vec<ExperienceSupplement>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, category, content, created_at FROM experience_supplements ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ExperienceSupplement {
+                id: row.get(0)?,
+                category: row.get(1)?,
+                content: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list experience supplements")
+    }
+
+    pub fn get_experience_supplement(&self, id: i64) -> Result<Option<ExperienceSupplement>> {
+        let result = self.conn.query_row(
+            "SELECT id, category, content, created_at FROM experience_supplements WHERE id = ?1",
+            [id],
+            |row| {
+                Ok(ExperienceSupplement {
+                    id: row.get(0)?,
+                    category: row.get(1)?,
+                    content: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            },
+        );
+        match result {
+            Ok(sup) => Ok(Some(sup)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn delete_experience_supplement(&self, id: i64) -> Result<()> {
+        let changes = self.conn.execute(
+            "DELETE FROM experience_supplements WHERE id = ?1",
+            [id],
+        )?;
+        if changes == 0 {
+            return Err(anyhow!("Experience supplement #{} not found", id));
+        }
+        Ok(())
+    }
+
+    /// Concatenates all experience supplements into a formatted text block for AI prompts.
+    /// Returns None if there are no supplements.
+    pub fn get_all_experience_text(&self) -> Result<Option<String>> {
+        let supplements = self.list_experience_supplements()?;
+        if supplements.is_empty() {
+            return Ok(None);
+        }
+        let mut text = String::new();
+        for sup in &supplements {
+            if let Some(cat) = &sup.category {
+                text.push_str(&format!("[{}]\n", cat));
+            }
+            text.push_str(&sup.content);
+            text.push_str("\n\n");
+        }
+        Ok(Some(text.trim().to_string()))
+    }
+
+    // --- Fit Analysis query for gap aggregation ---
+
+    /// List all fit analyses for a given resume, with job title and employer name
+    pub fn list_fit_analyses_for_resume(&self, base_resume_id: i64) -> Result<Vec<(FitAnalysis, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT fa.id, fa.job_id, fa.base_resume_id, fa.source_model, fa.fit_score,
+                    fa.strong_matches, fa.gaps, fa.stretch_areas, fa.narrative, fa.created_at,
+                    j.title, COALESCE(e.name, '')
+             FROM fit_analyses fa
+             JOIN jobs j ON fa.job_id = j.id
+             LEFT JOIN employers e ON j.employer_id = e.id
+             WHERE fa.base_resume_id = ?1
+             ORDER BY fa.created_at DESC",
+        )?;
+
+        let rows = stmt.query_map([base_resume_id], |row| {
+            Ok((
+                FitAnalysis {
+                    id: row.get(0)?,
+                    job_id: row.get(1)?,
+                    base_resume_id: row.get(2)?,
+                    source_model: row.get(3)?,
+                    fit_score: row.get(4)?,
+                    strong_matches: row.get(5)?,
+                    gaps: row.get(6)?,
+                    stretch_areas: row.get(7)?,
+                    narrative: row.get(8)?,
+                    created_at: row.get(9)?,
+                },
+                row.get::<_, String>(10)?,
+                row.get::<_, String>(11)?,
+            ))
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list fit analyses for resume")
+    }
+
     // --- Destruction operations ---
 
     pub fn get_destruction_stats(&self) -> Result<DestructionStats> {
@@ -1601,6 +1730,9 @@ impl Database {
         let fit_analyses: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM fit_analyses", [], |row| row.get(0),
         )?;
+        let experience_supplements: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM experience_supplements", [], |row| row.get(0),
+        )?;
 
         Ok(DestructionStats {
             jobs,
@@ -1611,6 +1743,7 @@ impl Database {
             job_keywords,
             job_keyword_profiles,
             fit_analyses,
+            experience_supplements,
         })
     }
 
@@ -1622,6 +1755,7 @@ impl Database {
         self.conn.execute("DELETE FROM base_resumes", [])?;
         self.conn.execute("DELETE FROM job_snapshots", [])?;
         self.conn.execute("DELETE FROM glassdoor_reviews", [])?;
+        self.conn.execute("DELETE FROM experience_supplements", [])?;
         self.conn.execute("DELETE FROM jobs", [])?;
         self.conn.execute("DELETE FROM employers", [])?;
 
@@ -2757,8 +2891,9 @@ mod tests {
         let stats = DestructionStats {
             jobs: 10, job_snapshots: 5, employers: 3, base_resumes: 2,
             resume_variants: 1, job_keywords: 20, job_keyword_profiles: 4, fit_analyses: 6,
+            experience_supplements: 3,
         };
-        assert_eq!(stats.total(), 51);
+        assert_eq!(stats.total(), 54);
     }
 
     #[test]
@@ -3054,6 +3189,99 @@ mod tests {
         let db = create_test_db()?;
         // Should succeed since create_test_db calls init
         db.ensure_initialized()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_add_and_list_experience_supplements() -> Result<()> {
+        let db = create_test_db()?;
+        let id1 = db.add_experience_supplement(Some("certifications"), "AWS Solutions Architect")?;
+        let id2 = db.add_experience_supplement(None, "Managed K8s clusters for 5 years")?;
+        assert!(id1 > 0);
+        assert!(id2 > 0);
+
+        let all = db.list_experience_supplements()?;
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].category.as_deref(), Some("certifications"));
+        assert_eq!(all[0].content, "AWS Solutions Architect");
+        assert!(all[1].category.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_experience_supplement() -> Result<()> {
+        let db = create_test_db()?;
+        let id = db.add_experience_supplement(Some("skills"), "Fluent in Spanish")?;
+        let sup = db.get_experience_supplement(id)?.unwrap();
+        assert_eq!(sup.id, id);
+        assert_eq!(sup.category.as_deref(), Some("skills"));
+        assert_eq!(sup.content, "Fluent in Spanish");
+
+        assert!(db.get_experience_supplement(9999)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_experience_supplement() -> Result<()> {
+        let db = create_test_db()?;
+        let id = db.add_experience_supplement(None, "Some experience")?;
+        db.delete_experience_supplement(id)?;
+        assert!(db.get_experience_supplement(id)?.is_none());
+
+        let result = db.delete_experience_supplement(9999);
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_all_experience_text() -> Result<()> {
+        let db = create_test_db()?;
+
+        // Empty case
+        assert!(db.get_all_experience_text()?.is_none());
+
+        // With entries
+        db.add_experience_supplement(Some("certifications"), "AWS SA Pro")?;
+        db.add_experience_supplement(None, "Led a team of 12 engineers")?;
+        let text = db.get_all_experience_text()?.unwrap();
+        assert!(text.contains("[certifications]"));
+        assert!(text.contains("AWS SA Pro"));
+        assert!(text.contains("Led a team of 12 engineers"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_fit_analyses_for_resume() -> Result<()> {
+        let db = create_test_db()?;
+        let emp_id = db.get_or_create_employer("Acme")?;
+        db.add_job_full("DevOps at Acme", Some("Acme"), None, None, None, None, Some("job text"))?;
+        let resume_id = db.create_base_resume("main", "markdown", "my resume", None)?;
+        db.save_fit_analysis(1, resume_id, "gpt-5.2", 75.0,
+            &["Kubernetes".to_string()], &["Java".to_string()],
+            &["system design".to_string()], "Good fit")?;
+        let _ = emp_id;
+
+        let results = db.list_fit_analyses_for_resume(resume_id)?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.fit_score, 75.0);
+        assert_eq!(results[0].1, "DevOps at Acme");
+        assert_eq!(results[0].2, "Acme");
+
+        // No results for nonexistent resume
+        let empty = db.list_fit_analyses_for_resume(9999)?;
+        assert!(empty.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_destroy_includes_experience_supplements() -> Result<()> {
+        let db = create_test_db()?;
+        db.add_experience_supplement(Some("skills"), "test")?;
+        let stats = db.get_destruction_stats()?;
+        assert_eq!(stats.experience_supplements, 1);
+        db.destroy_all_data()?;
+        let after = db.get_destruction_stats()?;
+        assert_eq!(after.experience_supplements, 0);
         Ok(())
     }
 }

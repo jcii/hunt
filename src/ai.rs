@@ -537,12 +537,39 @@ pub struct FitResult {
 
 pub fn analyze_fit(
     provider: &dyn AIProvider,
-    resume: &str,
+    all_resumes: &[(String, String)], // (name, content) pairs
     job_text: &str,
     title: &str,
+    experience: Option<&str>,
 ) -> Result<FitResult> {
+    let mut resume_sections = String::new();
+    for (i, (name, content)) in all_resumes.iter().enumerate() {
+        if i == 0 {
+            resume_sections.push_str(&format!("=== PRIMARY RESUME: {} ===\n{}\n\n", name, content));
+        } else {
+            resume_sections.push_str(&format!(
+                "=== ADDITIONAL RESUME: {} ===\n{}\n\n",
+                name, content
+            ));
+        }
+    }
+
+    let experience_section = if let Some(exp) = experience {
+        format!(
+            "\n=== SUPPLEMENTARY EXPERIENCE ===\n\
+            The following details are NOT on the resumes but ARE part of the candidate's real experience.\n\
+            Consider these when evaluating fit — a gap is something NEITHER the resumes NOR \
+            the supplementary experience address.\n\n{}\n\n",
+            exp
+        )
+    } else {
+        String::new()
+    };
+
     let prompt = format!(
-        "Compare this resume against the job posting and provide a fit analysis.\n\n\
+        "Compare this candidate's resumes against the job posting and provide a fit analysis.\n\n\
+        IMPORTANT: Consider ALL provided resumes as the SAME candidate. Look across all resumes \
+        for relevant experience.\n\n\
         Return EXACTLY in this format:\n\
         SCORE: <number 0-100>\n\
         STRONG_MATCHES: item1, item2, item3\n\
@@ -550,10 +577,11 @@ pub fn analyze_fit(
         STRETCH_AREAS: item1, item2, item3\n\
         NARRATIVE:\n\
         <2-3 paragraph narrative assessment>\n\n\
-        Job Title: {}\n\n\
-        Job Posting:\n{}\n\n\
-        Resume:\n{}",
-        title, job_text, resume
+        Job Title: {title}\n\n\
+        Job Posting:\n{job_text}\n\n\
+        {resume_sections}\
+        {experience_section}\
+        Provide the fit analysis now:",
     );
 
     let response = provider.complete(&prompt, 4096)?;
@@ -640,6 +668,7 @@ pub fn tailor_resume_full(
     title: &str,
     employer: Option<&str>,
     output_format: &str,
+    experience: Option<&str>,
 ) -> Result<String> {
     let mut resume_sections = String::new();
     for (i, (name, content)) in all_resumes.iter().enumerate() {
@@ -653,6 +682,18 @@ pub fn tailor_resume_full(
         }
     }
 
+    let experience_section = if let Some(exp) = experience {
+        format!(
+            "\n=== SUPPLEMENTARY EXPERIENCE ===\n\
+            The following details are NOT on the resumes but ARE part of the candidate's real experience.\n\
+            You MAY incorporate these facts into the tailored resume where they strengthen the fit.\n\
+            Stay 100% truthful — these are verified facts about the candidate.\n\n{}\n\n",
+            exp
+        )
+    } else {
+        String::new()
+    };
+
     let employer_str = employer.unwrap_or("the employer");
     let format_instruction = match output_format {
         "latex" => "Generate a complete LaTeX document for the resume. Use a clean, professional template with appropriate LaTeX packages. The output should compile directly with pdflatex.",
@@ -663,14 +704,15 @@ pub fn tailor_resume_full(
         "You are an expert resume writer. Generate a COMPLETE, TAILORED resume for the job below.\n\n\
         IMPORTANT RULES:\n\
         - Mine ALL provided resumes for relevant experience, skills, and achievements\n\
-        - Stay 100% truthful — only use facts from the provided resumes\n\
+        - Stay 100% truthful — only use facts from the provided resumes and supplementary experience\n\
         - Tailor language, emphasis, and ordering for this specific role\n\
         - Include ALL relevant experience across all resumes — don't omit anything useful\n\
         - {format_instruction}\n\n\
         Job Title: {title}\n\
         Employer: {employer_str}\n\n\
         Job Posting:\n{job_text}\n\n\
-        {resume_sections}\n\
+        {resume_sections}\
+        {experience_section}\
         Generate the complete tailored resume now:",
     );
 
@@ -1043,7 +1085,8 @@ mod tests {
              Strong fit for this role. The candidate has extensive cloud experience.\n\
              Some gaps in Java ecosystem but transferable skills are solid."
         );
-        let result = analyze_fit(&provider, "my resume", "job text", "DevOps Engineer").unwrap();
+        let resumes = vec![("main".to_string(), "my resume".to_string())];
+        let result = analyze_fit(&provider, &resumes, "job text", "DevOps Engineer", None).unwrap();
         assert!((result.fit_score - 75.0).abs() < 0.1);
         assert_eq!(result.strong_matches.len(), 3);
         assert_eq!(result.strong_matches[0], "Kubernetes");
@@ -1064,7 +1107,8 @@ mod tests {
              NARRATIVE:\n\
              Average fit."
         );
-        let result = analyze_fit(&provider, "resume", "job", "Title").unwrap();
+        let resumes = vec![("main".to_string(), "resume".to_string())];
+        let result = analyze_fit(&provider, &resumes, "job", "Title", None).unwrap();
         assert!((result.fit_score - 50.0).abs() < 0.1);
         assert!(result.strong_matches.is_empty());
         assert!(result.gaps.is_empty());
@@ -1082,7 +1126,8 @@ mod tests {
              NARRATIVE:\n\
              Test."
         );
-        let result = analyze_fit(&provider, "resume", "job", "Title").unwrap();
+        let resumes = vec![("main".to_string(), "resume".to_string())];
+        let result = analyze_fit(&provider, &resumes, "job", "Title", None).unwrap();
         assert!((result.fit_score - 0.0).abs() < 0.1);
     }
 
@@ -1097,7 +1142,7 @@ mod tests {
     fn test_tailor_resume_full_markdown() {
         let provider = MockProvider::new("# John Doe\n## Experience\n- DevOps at Acme");
         let resumes = vec![("main".to_string(), "John Doe resume content".to_string())];
-        let result = tailor_resume_full(&provider, &resumes, "job text", "DevOps", Some("Acme"), "markdown").unwrap();
+        let result = tailor_resume_full(&provider, &resumes, "job text", "DevOps", Some("Acme"), "markdown", None).unwrap();
         assert!(result.contains("John Doe"));
     }
 
@@ -1108,8 +1153,38 @@ mod tests {
             ("main".to_string(), "primary resume".to_string()),
             ("extra".to_string(), "secondary resume".to_string()),
         ];
-        let result = tailor_resume_full(&provider, &resumes, "job text", "DevOps", None, "latex").unwrap();
+        let result = tailor_resume_full(&provider, &resumes, "job text", "DevOps", None, "latex", None).unwrap();
         assert!(result.contains("\\documentclass"));
+    }
+
+    #[test]
+    fn test_analyze_fit_with_experience() {
+        let provider = MockProvider::new(
+            "SCORE: 85\n\
+             STRONG_MATCHES: Kubernetes, Python, K8s management\n\
+             GAPS: GraphQL\n\
+             STRETCH_AREAS: team lead\n\
+             NARRATIVE:\n\
+             Excellent fit including supplementary experience."
+        );
+        let resumes = vec![("main".to_string(), "my resume".to_string())];
+        let result = analyze_fit(
+            &provider, &resumes, "job text", "DevOps Engineer",
+            Some("Managed K8s clusters for 5 years"),
+        ).unwrap();
+        assert!((result.fit_score - 85.0).abs() < 0.1);
+        assert_eq!(result.strong_matches.len(), 3);
+    }
+
+    #[test]
+    fn test_tailor_resume_full_with_experience() {
+        let provider = MockProvider::new("# John Doe\n## Experience\n- K8s and DevOps");
+        let resumes = vec![("main".to_string(), "resume content".to_string())];
+        let result = tailor_resume_full(
+            &provider, &resumes, "job text", "DevOps", Some("Acme"), "markdown",
+            Some("Managed K8s clusters for 5 years at Scale Corp"),
+        ).unwrap();
+        assert!(result.contains("John Doe"));
     }
 
     #[test]

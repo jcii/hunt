@@ -201,25 +201,14 @@ enum Commands {
 
     /// Analyze resume fit against a job posting
     Fit {
-        /// Job ID to compare against (not used with --all)
-        #[arg(required_unless_present = "all")]
-        job_id: Option<i64>,
+        #[command(subcommand)]
+        command: FitCommands,
+    },
 
-        /// Base resume name or ID
-        #[arg(short, long)]
-        resume: String,
-
-        /// AI model to use (default: claude-sonnet)
-        #[arg(short, long, default_value = "gpt-5.2")]
-        model: String,
-
-        /// Run fit analysis on all jobs with descriptions
-        #[arg(long)]
-        all: bool,
-
-        /// Re-analyze even if fit analysis already exists (use with --all)
-        #[arg(long)]
-        force: bool,
+    /// Manage supplementary experience (details not on any resume)
+    Experience {
+        #[command(subcommand)]
+        command: ExperienceCommands,
     },
 
     /// Browse jobs interactively in a TUI
@@ -424,6 +413,75 @@ enum StartupCommands {
     Research {
         /// Employer name
         employer: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum FitCommands {
+    /// Run fit analysis against a job posting
+    Run {
+        /// Job ID to compare against (not used with --all)
+        #[arg(required_unless_present = "all")]
+        job_id: Option<i64>,
+
+        /// Base resume name or ID
+        #[arg(short, long)]
+        resume: String,
+
+        /// AI model to use
+        #[arg(short, long, default_value = "gpt-5.2")]
+        model: String,
+
+        /// Run fit analysis on all jobs with descriptions
+        #[arg(long)]
+        all: bool,
+
+        /// Re-analyze even if fit analysis already exists (use with --all)
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Show aggregated gaps across all fit analyses for a resume
+    Gaps {
+        /// Base resume name or ID
+        #[arg(short, long)]
+        resume: String,
+
+        /// Minimum number of times a gap must appear (default: 1)
+        #[arg(long, default_value_t = 1)]
+        min_count: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExperienceCommands {
+    /// Add supplementary experience
+    Add {
+        /// Experience text (or use --file)
+        content: Option<String>,
+
+        /// Read content from a file instead
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+
+        /// Category label (e.g. "certifications", "projects", "skills")
+        #[arg(short, long)]
+        category: Option<String>,
+    },
+
+    /// List all experience supplements
+    List,
+
+    /// Show a specific experience supplement
+    Show {
+        /// Supplement ID
+        id: i64,
+    },
+
+    /// Remove an experience supplement
+    Remove {
+        /// Supplement ID
+        id: i64,
     },
 }
 
@@ -1261,6 +1319,7 @@ fn main() -> Result<()> {
                     };
 
                     let employer_name = job.employer_name.as_deref();
+                    let experience_text = db.get_all_experience_text()?;
 
                     for model_name in &model_names {
                         let spec = ai::resolve_model(model_name)?;
@@ -1276,6 +1335,7 @@ fn main() -> Result<()> {
                             &job.title,
                             employer_name,
                             &format,
+                            experience_text.as_deref(),
                         )?;
 
                         let notes = format!("Tailored for: {} (model: {}, format: {})",
@@ -1571,6 +1631,7 @@ fn main() -> Result<()> {
             println!("  Job keywords:       {}", stats.job_keywords);
             println!("  Keyword profiles:   {}", stats.job_keyword_profiles);
             println!("  Fit analyses:       {}", stats.fit_analyses);
+            println!("  Experience supps:   {}", stats.experience_supplements);
             println!("\nTotal records: {}", stats.total());
 
             if !confirm {
@@ -1986,130 +2047,273 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Fit { job_id, resume, model, all, force } => {
+        Commands::Fit { command } => {
             db.ensure_initialized()?;
+            match command {
+                FitCommands::Run { job_id, resume, model, all, force } => {
+                    let base_resume = if let Ok(id) = resume.parse::<i64>() {
+                        db.get_base_resume(id)?
+                    } else {
+                        db.get_base_resume_by_name(&resume)?
+                    }
+                    .ok_or_else(|| anyhow!("Resume '{}' not found", resume))?;
 
-            let base_resume = if let Ok(id) = resume.parse::<i64>() {
-                db.get_base_resume(id)?
-            } else {
-                db.get_base_resume_by_name(&resume)?
+                    let spec = ai::resolve_model(&model)?;
+                    let provider = ai::create_provider(&spec)?;
+
+                    // Gather all resumes: primary first, then others
+                    let all_resumes_db = db.list_base_resumes()?;
+                    let mut all_resumes: Vec<(String, String)> = Vec::new();
+                    all_resumes.push((base_resume.name.clone(), base_resume.content.clone()));
+                    for r in &all_resumes_db {
+                        if r.id != base_resume.id {
+                            all_resumes.push((r.name.clone(), r.content.clone()));
+                        }
+                    }
+
+                    // Gather experience supplements
+                    let experience_text = db.get_all_experience_text()?;
+
+                    if all {
+                        // Run fit analysis on all non-closed jobs with descriptions
+                        let jobs = db.list_jobs(None, None)?;
+                        let candidates: Vec<&models::Job> = jobs.iter()
+                            .filter(|j| j.status != "closed" && j.status != "rejected" && j.raw_text.is_some())
+                            .collect();
+
+                        let total = candidates.len();
+                        if total == 0 {
+                            println!("No jobs with descriptions found.");
+                            return Ok(());
+                        }
+
+                        let mut analyzed = 0;
+                        let mut skipped = 0;
+                        let mut errors = 0;
+
+                        for (i, job) in candidates.iter().enumerate() {
+                            if !force && db.has_fit_analysis(job.id, base_resume.id, &spec.short_name)? {
+                                skipped += 1;
+                                continue;
+                            }
+
+                            let job_text = job.raw_text.as_ref().unwrap();
+                            let title_short: String = job.title.chars().take(40).collect();
+                            print!("[{}/{}] Analyzing job #{}: {}...", i + 1, total, job.id, title_short);
+                            use std::io::Write;
+                            let _ = std::io::stdout().flush();
+
+                            match ai::analyze_fit(
+                                provider.as_ref(), &all_resumes, job_text, &job.title,
+                                experience_text.as_deref(),
+                            ) {
+                                Ok(fit) => {
+                                    db.save_fit_analysis(
+                                        job.id, base_resume.id, &spec.short_name,
+                                        fit.fit_score, &fit.strong_matches, &fit.gaps,
+                                        &fit.stretch_areas, &fit.narrative,
+                                    )?;
+                                    println!("  score: {:.0}", fit.fit_score);
+                                    analyzed += 1;
+                                }
+                                Err(e) => {
+                                    println!("  ERROR: {}", e);
+                                    errors += 1;
+                                }
+                            }
+                        }
+
+                        println!("\nDone: {} analyzed, {} skipped (existing), {} errors", analyzed, skipped, errors);
+                    } else {
+                        let job_id = job_id.ok_or_else(|| anyhow!("Job ID required (or use --all)"))?;
+                        let job = db.get_job(job_id)?
+                            .ok_or_else(|| anyhow!("Job #{} not found", job_id))?;
+
+                        let job_text = job.raw_text
+                            .as_ref()
+                            .ok_or_else(|| anyhow!("Job #{} has no raw text for fit analysis", job_id))?;
+
+                        println!("Analyzing fit for job #{}: {} (model: {})...\n", job_id, job.title, spec.short_name);
+
+                        let fit = ai::analyze_fit(
+                            provider.as_ref(), &all_resumes, job_text, &job.title,
+                            experience_text.as_deref(),
+                        )?;
+
+                        db.save_fit_analysis(
+                            job_id, base_resume.id, &spec.short_name,
+                            fit.fit_score, &fit.strong_matches, &fit.gaps,
+                            &fit.stretch_areas, &fit.narrative,
+                        )?;
+
+                        println!("=== Fit Analysis ===\n");
+                        println!("Fit Score: {:.0}/100\n", fit.fit_score);
+
+                        if !fit.strong_matches.is_empty() {
+                            println!("Strong Matches:");
+                            for item in &fit.strong_matches {
+                                println!("  + {}", item);
+                            }
+                            println!();
+                        }
+
+                        if !fit.gaps.is_empty() {
+                            println!("Gaps:");
+                            for item in &fit.gaps {
+                                println!("  - {}", item);
+                            }
+                            println!();
+                        }
+
+                        if !fit.stretch_areas.is_empty() {
+                            println!("Stretch Areas:");
+                            for item in &fit.stretch_areas {
+                                println!("  ~ {}", item);
+                            }
+                            println!();
+                        }
+
+                        if !fit.narrative.is_empty() {
+                            println!("Narrative:\n{}", fit.narrative);
+                        }
+
+                        println!("\n(Stored in DB, model: {})", spec.short_name);
+                    }
+                }
+
+                FitCommands::Gaps { resume, min_count } => {
+                    let base_resume = if let Ok(id) = resume.parse::<i64>() {
+                        db.get_base_resume(id)?
+                    } else {
+                        db.get_base_resume_by_name(&resume)?
+                    }
+                    .ok_or_else(|| anyhow!("Resume '{}' not found", resume))?;
+
+                    let analyses = db.list_fit_analyses_for_resume(base_resume.id)?;
+
+                    if analyses.is_empty() {
+                        println!("No fit analyses found for resume '{}'. Run 'hunt fit run --resume {} --all' first.",
+                                 base_resume.name, base_resume.name);
+                        return Ok(());
+                    }
+
+                    // Parse gaps, aggregate case-insensitively
+                    let mut gap_counts: std::collections::HashMap<String, (usize, Vec<String>)> =
+                        std::collections::HashMap::new();
+
+                    for (analysis, job_title, employer_name) in &analyses {
+                        if let Some(gaps_str) = &analysis.gaps {
+                            for gap in gaps_str.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                                let key = gap.to_lowercase();
+                                let entry = gap_counts.entry(key).or_insert_with(|| (0, Vec::new()));
+                                entry.0 += 1;
+                                let cite = if employer_name.is_empty() {
+                                    format!("#{} {}", analysis.job_id, job_title)
+                                } else {
+                                    format!("#{} {} at {}", analysis.job_id, job_title, employer_name)
+                                };
+                                entry.1.push(cite);
+                            }
+                        }
+                    }
+
+                    // Filter by min_count and sort by frequency descending
+                    let mut sorted: Vec<(String, usize, Vec<String>)> = gap_counts
+                        .into_iter()
+                        .filter(|(_, (count, _))| *count >= min_count)
+                        .map(|(gap, (count, cites))| (gap, count, cites))
+                        .collect();
+                    sorted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+                    if sorted.is_empty() {
+                        println!("No gaps found with count >= {} for resume '{}'.", min_count, base_resume.name);
+                        return Ok(());
+                    }
+
+                    println!("Aggregated Gaps for resume \"{}\" ({} fit analyses)\n",
+                             base_resume.name, analyses.len());
+                    println!("{:>5}  {:<30} CITED BY", "COUNT", "GAP");
+                    println!("{}", "-".repeat(80));
+
+                    for (gap, count, cites) in &sorted {
+                        let cites_str = if cites.len() > 3 {
+                            format!("{}, ... (+{} more)", cites[..3].join(", "), cites.len() - 3)
+                        } else {
+                            cites.join(", ")
+                        };
+                        println!("{:>5}  {:<30} {}", count, truncate(gap, 28), cites_str);
+                    }
+
+                    println!("\nTotal unique gaps: {}", sorted.len());
+                }
             }
-            .ok_or_else(|| anyhow!("Resume '{}' not found", resume))?;
+        }
 
-            let spec = ai::resolve_model(&model)?;
-            let provider = ai::create_provider(&spec)?;
+        Commands::Experience { command } => {
+            db.ensure_initialized()?;
+            match command {
+                ExperienceCommands::Add { content, file, category } => {
+                    let text = if let Some(file_path) = file {
+                        let expanded = if file_path.starts_with("~/") {
+                            let home = std::env::var("HOME").unwrap_or_default();
+                            PathBuf::from(format!("{}/{}", home, file_path.to_string_lossy().strip_prefix("~/").unwrap()))
+                        } else {
+                            file_path
+                        };
+                        std::fs::read_to_string(&expanded)
+                            .with_context(|| format!("Failed to read file: {}", expanded.display()))?
+                    } else if let Some(text) = content {
+                        text
+                    } else {
+                        return Err(anyhow!("Provide experience text or --file"));
+                    };
 
-            if all {
-                // Run fit analysis on all non-closed jobs with descriptions
-                let jobs = db.list_jobs(None, None)?;
-                let candidates: Vec<&models::Job> = jobs.iter()
-                    .filter(|j| j.status != "closed" && j.status != "rejected" && j.raw_text.is_some())
-                    .collect();
-
-                let total = candidates.len();
-                if total == 0 {
-                    println!("No jobs with descriptions found.");
-                    return Ok(());
+                    let id = db.add_experience_supplement(category.as_deref(), &text)?;
+                    println!("Added experience supplement #{}", id);
+                    if let Some(cat) = &category {
+                        println!("Category: {}", cat);
+                    }
+                    println!("Content: {}", truncate(&text, 80));
                 }
 
-                let mut analyzed = 0;
-                let mut skipped = 0;
-                let mut errors = 0;
-
-                for (i, job) in candidates.iter().enumerate() {
-                    // Skip if already analyzed (unless --force)
-                    if !force && db.has_fit_analysis(job.id, base_resume.id, &spec.short_name)? {
-                        skipped += 1;
-                        continue;
-                    }
-
-                    let job_text = job.raw_text.as_ref().unwrap();
-                    let title_short: String = job.title.chars().take(40).collect();
-                    print!("[{}/{}] Analyzing job #{}: {}...", i + 1, total, job.id, title_short);
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-
-                    match ai::analyze_fit(provider.as_ref(), &base_resume.content, job_text, &job.title) {
-                        Ok(fit) => {
-                            db.save_fit_analysis(
-                                job.id,
-                                base_resume.id,
-                                &spec.short_name,
-                                fit.fit_score,
-                                &fit.strong_matches,
-                                &fit.gaps,
-                                &fit.stretch_areas,
-                                &fit.narrative,
-                            )?;
-                            println!("  score: {:.0}", fit.fit_score);
-                            analyzed += 1;
-                        }
-                        Err(e) => {
-                            println!("  ERROR: {}", e);
-                            errors += 1;
+                ExperienceCommands::List => {
+                    let supplements = db.list_experience_supplements()?;
+                    if supplements.is_empty() {
+                        println!("No experience supplements found.");
+                    } else {
+                        println!("{:<6} {:<20} {:<60}", "ID", "CATEGORY", "CONTENT");
+                        println!("{}", "-".repeat(88));
+                        for sup in &supplements {
+                            println!(
+                                "{:<6} {:<20} {:<60}",
+                                sup.id,
+                                truncate(sup.category.as_deref().unwrap_or("-"), 18),
+                                truncate(&sup.content, 58),
+                            );
                         }
                     }
                 }
 
-                println!("\nDone: {} analyzed, {} skipped (existing), {} errors", analyzed, skipped, errors);
-            } else {
-                // Single job fit analysis
-                let job_id = job_id.ok_or_else(|| anyhow!("Job ID required (or use --all)"))?;
-                let job = db.get_job(job_id)?
-                    .ok_or_else(|| anyhow!("Job #{} not found", job_id))?;
-
-                let job_text = job.raw_text
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("Job #{} has no raw text for fit analysis", job_id))?;
-
-                println!("Analyzing fit for job #{}: {} (model: {})...\n", job_id, job.title, spec.short_name);
-
-                let fit = ai::analyze_fit(provider.as_ref(), &base_resume.content, job_text, &job.title)?;
-
-                // Store in database
-                db.save_fit_analysis(
-                    job_id,
-                    base_resume.id,
-                    &spec.short_name,
-                    fit.fit_score,
-                    &fit.strong_matches,
-                    &fit.gaps,
-                    &fit.stretch_areas,
-                    &fit.narrative,
-                )?;
-
-                println!("=== Fit Analysis ===\n");
-                println!("Fit Score: {:.0}/100\n", fit.fit_score);
-
-                if !fit.strong_matches.is_empty() {
-                    println!("Strong Matches:");
-                    for item in &fit.strong_matches {
-                        println!("  + {}", item);
+                ExperienceCommands::Show { id } => {
+                    match db.get_experience_supplement(id)? {
+                        Some(sup) => {
+                            println!("Experience Supplement #{}", sup.id);
+                            if let Some(cat) = &sup.category {
+                                println!("Category: {}", cat);
+                            }
+                            println!("Created: {}", sup.created_at);
+                            println!("\n{}", sup.content);
+                        }
+                        None => {
+                            println!("Experience supplement #{} not found.", id);
+                        }
                     }
-                    println!();
                 }
 
-                if !fit.gaps.is_empty() {
-                    println!("Gaps:");
-                    for item in &fit.gaps {
-                        println!("  - {}", item);
-                    }
-                    println!();
+                ExperienceCommands::Remove { id } => {
+                    db.delete_experience_supplement(id)?;
+                    println!("Removed experience supplement #{}.", id);
                 }
-
-                if !fit.stretch_areas.is_empty() {
-                    println!("Stretch Areas:");
-                    for item in &fit.stretch_areas {
-                        println!("  ~ {}", item);
-                    }
-                    println!();
-                }
-
-                if !fit.narrative.is_empty() {
-                    println!("Narrative:\n{}", fit.narrative);
-                }
-
-                println!("\n(Stored in DB, model: {})", spec.short_name);
             }
         }
 

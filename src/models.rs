@@ -128,6 +128,14 @@ pub struct FitAnalysis {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExperienceSupplement {
+    pub id: i64,
+    pub category: Option<String>,
+    pub content: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlassdoorReview {
     pub id: i64,
     pub employer_id: i64,
